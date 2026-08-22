@@ -32,7 +32,7 @@ android {
 
     defaultConfig {
         multiDexEnabled true
-        applicationId "app.leo.alibi_cam"
+        applicationId "com.blink.academy.protake"
         minSdk 24
         targetSdk 34
         versionCode 17
@@ -63,7 +63,7 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
         debug {
-            applicationIdSuffix ".debug"
+            applicationIdSuffix ""
             debuggable true
         }
     }

@@ -23,7 +23,7 @@
     <string name="ui_recorder_action_delete_confirm_message">您确定要删除此录制？</string>
     <string name="ui_recorder_action_pause_label">暂停</string>
     <string name="ui_recorder_action_resume_label">继续</string>
-    <string name="ui_recorder_action_save_label">保存并退出</string>
+    <string name="ui_recorder_action_save_label">保存</string>
     <string name="ui_recorder_action_stop_save">停止并保存</string>
     <string name="ui_recorder_action_save_success">您的录制已成功保存！</string>
     <string name="ui_recorder_action_save_openFolder">打开</string>
@@ -146,10 +146,14 @@
     <string name="ui_settings_value_videoQuality_values_hd">高清</string>
     <string name="ui_settings_value_videoQuality_values_sd">标准</string>
     <string name="ui_settings_value_videoQuality_values_lowest">最低</string>
+    <string name="ui_settings_option_dualCamera_title">双摄同时录制</string>
+    <string name="ui_settings_option_dualCamera_description">最多同时使用两个摄像头录制，分别保存独立文件。需要设备硬件支持（ConcurrentCamera）。</string>
+    <string name="ui_settings_value_cameraLens_selectTwo">最多选择2个镜头</string>
     <string name="ui_settings_option_cameraLensTile_title">摄像头镜头</string>
     <string name="ui_settings_value_cameraLens_auto">自动（优先超广角）</string>
-    <string name="ui_settings_value_cameraLens_ultrawide">超广角</string>
     <string name="ui_settings_value_cameraLens_main">主摄像头</string>
+    <string name="ui_settings_value_cameraLens_ultrawide">超广角</string>
+    <string name="ui_settings_value_cameraLens_telephoto">长焦镜头</string>
     <string name="ui_settings_value_cameraLens_front">前置摄像头</string>
     <string name="ui_settings_option_videoAspectRatioTile_title">录制比例</string>
     <string name="ui_settings_value_videoAspectRatio_4_3">4:3</string>
@@ -159,6 +163,7 @@
     <string name="ui_videoRecorder_action_start_settings_cameraLens_back_label">后置摄像头</string>
     <string name="ui_videoRecorder_action_start_settings_cameraLens_front_label">前置摄像头</string>
     <string name="ui_videoRecorder_action_start_settings_cameraLens_ultrawide_label">超广角</string>
+    <string name="ui_videoRecorder_action_start_settings_cameraLens_telephoto_label">长焦镜头</string>
     <string name="ui_videoRecorder_action_start_settings_cameraLens_main_label">主摄像头</string>
     <string name="ui_videoRecorder_action_start_settings_cameraLens_external_label">外置摄像头</string>
     <string name="ui_videoRecorder_action_start_settings_cameraLens_label">摄像头%s</string>

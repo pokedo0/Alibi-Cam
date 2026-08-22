@@ -16,9 +16,12 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
 import android.util.Range
+import androidx.annotation.RequiresApi
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ConcurrentCamera
 import androidx.camera.core.TorchState
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FileDescriptorOutputOptions
@@ -41,11 +44,14 @@ import app.leo.alibi_cam.dataStore
 import app.leo.alibi_cam.db.RecordingInformation
 import app.leo.alibi_cam.enums.RecorderState
 import app.leo.alibi_cam.helpers.BatchesFolder
+import app.leo.alibi_cam.helpers.Camera2PhysicalDualRecorder
 import app.leo.alibi_cam.helpers.VideoBatchesFolder
 import app.leo.alibi_cam.ui.SUPPORTS_SAVING_VIDEOS_IN_CUSTOM_FOLDERS
 import app.leo.alibi_cam.ui.SUPPORTS_SCOPED_STORAGE
 import app.leo.alibi_cam.helpers.CameraDebugLog
+import app.leo.alibi_cam.helpers.CameraPosition
 import app.leo.alibi_cam.helpers.SensorDebugLog
+import app.leo.alibi_cam.ui.utils.DualCameraSupport
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -67,17 +73,39 @@ class VideoRecorderService :
     IntervalRecorderService<RecordingInformation, VideoBatchesFolder>() {
     override var batchesFolder = VideoBatchesFolder.viaInternalFolder(this)
 
+    // Secondary batches folder for dual-camera output (null in single-camera mode)
+    var secondaryBatchesFolder: VideoBatchesFolder? = null
+
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
 
-    private var camera: Camera? = null
+    /**
+     * Per-camera recording state. Holds everything needed to manage one
+     * concurrent video stream (camera, video capture, active recording,
+     * finalizer handles).
+     */
+    private class RecordingStream(val position: CameraPosition) {
+        var camera: Camera? = null
+        var videoCapture: VideoCapture<Recorder>? = null
+        var activeRecording: Recording? = null
+
+        @Volatile
+        var activeRecordingFinalizer: CompletableDeferred<Unit>? = null
+
+        @Volatile
+        var previousRecordingFinalizer: CompletableDeferred<Unit>? = null
+    }
+
+    private var primary = RecordingStream(CameraPosition.SINGLE)
+    private var secondary: RecordingStream? = null
+
+    private var physicalDualRecorder: Camera2PhysicalDualRecorder? = null
+
     private var cameraProvider: ProcessCameraProvider? = null
-    private var videoCapture: VideoCapture<Recorder>? = null
-    private var activeRecording: Recording? = null
+    private var isDualMode = false
 
     // Used to listen and check if the camera is available
     private var _cameraAvailableListener = CompletableDeferred<Unit>()
-    private lateinit var _videoFinalizerListener: CompletableDeferred<Unit>;
 
     // Absolute last completer that can be awaited to ensure that the camera is closed
     private var _cameraCloserListener = CompletableDeferred<Unit>()
@@ -87,6 +115,9 @@ class VideoRecorderService :
     private var enableAudio by Delegates.notNull<Boolean>()
 
     var onCameraControlAvailable = {}
+
+    /** Whether dual camera is currently active (both streams recording). */
+    fun isDualCameraActive(): Boolean = isDualMode
 
     // ── 传感器自动停止 ──
     private var sensorManager: SensorManager? = null
@@ -161,6 +192,7 @@ class VideoRecorderService :
             DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
         )
         batchesFolder.sessionId = sessionId
+        secondaryBatchesFolder?.sessionId = sessionId
         Log.i(TAG, "📁 Session: $sessionId (flat storage)")
         CameraDebugLog.append("📁 Session: $sessionId (flat)")
 
@@ -181,7 +213,8 @@ class VideoRecorderService :
 
         // Camera can only be closed after the recording has been finalized
         withTimeoutOrNull(CAMERA_CLOSE_TIMEOUT) {
-            _videoFinalizerListener.await()
+            primary.activeRecordingFinalizer?.await()
+            secondary?.activeRecordingFinalizer?.await()
         }
 
         closeCamera()
@@ -222,18 +255,19 @@ class VideoRecorderService :
             // just-finalized chunk must be on disk/MediaStore when we count.
             counter += 1
 
-            Log.i(TAG, "🔄 startNewCycle: counter=$counter")
-            CameraDebugLog.append("🔄 startNewCycle: counter=$counter")
+            Log.i(TAG, "🔄 startNewCycle: counter=$counter, isDualMode=$isDualMode")
+            CameraDebugLog.append("🔄 startNewCycle: counter=$counter, dual=$isDualMode")
 
             fun action() {
-                stopActiveRecording()
-                val newRecording = prepareVideoRecording()
-
-                _videoFinalizerListener = CompletableDeferred()
-
-                activeRecording = newRecording.start(ContextCompat.getMainExecutor(this)) { event ->
-                    if (event is VideoRecordEvent.Finalize && (this@VideoRecorderService.state == RecorderState.STOPPED || this@VideoRecorderService.state == RecorderState.PAUSED)) {
-                        _videoFinalizerListener.complete(Unit)
+                if (physicalDualRecorder?.isRecording == true) {
+                    physicalDualRecorder?.rotateNextChunk(counter)
+                } else {
+                    stopActiveRecording()
+                    startCycleForStream(primary, batchesFolder)
+                    secondary?.let { stream ->
+                        secondaryBatchesFolder?.let { folder ->
+                            startCycleForStream(stream, folder)
+                        }
                     }
                 }
             }
@@ -260,6 +294,30 @@ class VideoRecorderService :
         }
     }
 
+    /**
+     * Start a new recording cycle for a single stream.
+     * This is called for both primary and secondary in dual mode.
+     */
+    @SuppressLint("MissingPermission")
+    private fun startCycleForStream(stream: RecordingStream, folder: VideoBatchesFolder) {
+        val videoCapture = stream.videoCapture ?: return
+
+        // The currently-active finalizer belongs to the recording we're
+        // about to stop. Save it so save flows can await it.
+        stream.previousRecordingFinalizer = stream.activeRecordingFinalizer
+        stream.activeRecordingFinalizer = CompletableDeferred()
+
+        val newRecording = prepareVideoRecording(videoCapture, folder)
+        stream.activeRecording = newRecording.start(ContextCompat.getMainExecutor(this)) { event ->
+            if (event is VideoRecordEvent.Finalize &&
+                (this@VideoRecorderService.state == RecorderState.STOPPED ||
+                 this@VideoRecorderService.state == RecorderState.PAUSED)) {
+                stream.activeRecordingFinalizer?.complete(Unit)
+            }
+        }
+        Log.i(TAG, "🎬 Recording started for stream ${stream.position}")
+        CameraDebugLog.append("🎬 Recording started: ${stream.position}")
+    }
 
     /**
      * Global rolling-window pruning — flat storage version.
@@ -309,6 +367,24 @@ class VideoRecorderService :
             Log.i(TAG, "🧹 Duration pruning complete: deleted $deleted chunks, final=$totalMs ms")
             CameraDebugLog.append("🧹 Duration pruning: deleted $deleted chunks, final=$totalMs ms")
             CameraDebugLog.flush()
+            // Also prune secondary batches folder in dual-camera mode
+            secondaryBatchesFolder?.let { secFolder ->
+                secFolder.permanentlyDeleteRecordings = settings.permanentlyDeleteRecordings
+                val secChunks = secFolder.listFlatChunksWithDuration()
+                var secTotalMs = secChunks.sumOf { it.second }
+                if (secTotalMs > maxDurationMs) {
+                    var secDeleted = 0
+                    for ((name, durationMs) in secChunks) {
+                        if (secTotalMs <= maxDurationMs) break
+                        val ok = secFolder.deleteFlatChunk(name)
+                        if (ok) {
+                            secTotalMs -= durationMs
+                            secDeleted++
+                        }
+                    }
+                    Log.i(TAG, "🧹 Dual-cam secondary pruning complete: deleted $secDeleted chunks")
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "🧹 deleteOldRecordings FAILED: ${e.javaClass.simpleName}: ${e.message}", e)
             CameraDebugLog.append("🧹 ❌ deleteOldRecordings FAILED: ${e.javaClass.simpleName}: ${e.message}")
@@ -359,21 +435,183 @@ class VideoRecorderService :
         .build()
 
     /**
-     * Open the camera and optionally engage ultra-wide via zoom ratio.
+     * Open the camera(s) and optionally engage ultra-wide via zoom ratio.
      *
-     * Strategy:
-     * 1. Bind the logical camera (always — no physical-camera-ID trickery)
-     * 2. After successful bind, if cameraLensMode == "ultrawide",
-     *    set zoom to minZoomRatio to engage the UW hardware
-     * 3. If binding fails with the user's preferred aspect ratio,
-     *    retry with 16:9 (many sensors only support 16:9 natively)
-     * 4. If everything fails → show error
+     * In dual-camera mode (when dualCameraEnabled is true and device supports ConcurrentCamera):
+     * - Binds two cameras concurrently via ConcurrentCamera API
+     * - Each camera records to its own stream and folder (separated by CameraPosition)
+     * - If concurrent binding fails, gracefully falls back to single camera.
      */
     private suspend fun openCamera() {
         cameraProvider = withContext(Dispatchers.IO) {
             ProcessCameraProvider.getInstance(this@VideoRecorderService).get()
         }
 
+        val dualRequested = settings.videoRecorderSettings.dualCameraEnabled
+        val primaryLens = settings.videoRecorderSettings.cameraLens
+        val secondaryLens = settings.videoRecorderSettings.secondaryCameraLens
+
+        val plan = if (dualRequested && secondaryLens != null) {
+            DualCameraSupport.resolveDualPlan(this, cameraProvider!!, primaryLens, secondaryLens)
+        } else {
+            DualCameraSupport.DualPlan(DualCameraSupport.Strategy.NONE)
+        }
+
+        Log.i(TAG, "📸 openCamera: dualRequested=$dualRequested, planStrategy=${plan.strategy}")
+        CameraDebugLog.append("📸 openCamera: dualReq=$dualRequested, plan=${plan.strategy}")
+
+        when (plan.strategy) {
+            DualCameraSupport.Strategy.CONCURRENT_CAMERAX -> {
+                isDualMode = true
+                openDualCamera(plan.cameraxPair!!)
+            }
+            DualCameraSupport.Strategy.PHYSICAL_CAMERA2 -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    isDualMode = true
+                    openPhysicalDualCamera(plan.primaryPhysicalId!!, plan.secondaryPhysicalId!!)
+                } else {
+                    isDualMode = false
+                    openSingleCamera()
+                }
+            }
+            DualCameraSupport.Strategy.NONE -> {
+                isDualMode = false
+                openSingleCamera()
+            }
+        }
+    }
+
+    /**
+     * Bind two physical sub-cameras of logical camera 0 using Camera2 API.
+     */
+    @RequiresApi(Build.VERSION_CODES.P)
+    private fun openPhysicalDualCamera(primaryPhysicalId: String, secondaryPhysicalId: String) {
+        val primaryPosition = CameraPosition.fromLensString(settings.videoRecorderSettings.cameraLens)
+        val secondaryPosition = CameraPosition.fromLensString(settings.videoRecorderSettings.secondaryCameraLens)
+
+        Log.i(TAG, "📸 openPhysicalDualCamera: primary=$primaryPhysicalId ($primaryPosition), secondary=$secondaryPhysicalId ($secondaryPosition)")
+        CameraDebugLog.append("📸 openPhysicalDualCamera: prim=$primaryPhysicalId, sec=$secondaryPhysicalId")
+
+        // Ensure secondary batches folder exists
+        if (secondaryBatchesFolder == null) {
+            secondaryBatchesFolder = VideoBatchesFolder.viaInternalFolder(
+                this@VideoRecorderService,
+                secondaryPosition,
+            ).also {
+                it.sessionId = batchesFolder.sessionId
+                it.initFolders()
+            }
+        } else {
+            secondaryBatchesFolder!!.sessionId = batchesFolder.sessionId
+            secondaryBatchesFolder!!.initFolders()
+        }
+
+        physicalDualRecorder = Camera2PhysicalDualRecorder(
+            context = this,
+            settings = settings,
+            primaryPhysicalId = primaryPhysicalId,
+            secondaryPhysicalId = secondaryPhysicalId,
+            primaryFolder = batchesFolder,
+            secondaryFolder = secondaryBatchesFolder!!,
+            enableAudio = enableAudio,
+        )
+
+        physicalDualRecorder!!.start(
+            counter = counter,
+            onStarted = {
+                _cameraAvailableListener.complete(Unit)
+                Log.i(TAG, "📸 ✅ Physical dual camera recorder ready")
+            },
+            onError = { err: String ->
+                Log.e(TAG, "📸 ❌ Physical dual camera failed: $err")
+                _cameraAvailableListener.complete(Unit)
+            }
+        )
+    }
+
+    /**
+     * Bind two cameras concurrently using CameraX ConcurrentCamera API.
+     */
+    private fun openDualCamera(pair: DualCameraSupport.SupportedPair) {
+        val userAspectRatio = settings.videoRecorderSettings.videoAspectRatio ?: "4:3"
+        val primaryRecorder = buildRecorder(userAspectRatio)
+        val primaryVideoCapture = buildVideoCapture(primaryRecorder)
+        val primaryUseCaseGroup = UseCaseGroup.Builder()
+            .addUseCase(primaryVideoCapture)
+            .build()
+
+        val secondaryRecorder = buildRecorder(userAspectRatio)
+        val secondaryVideoCapture = buildVideoCapture(secondaryRecorder)
+        val secondaryUseCaseGroup = UseCaseGroup.Builder()
+            .addUseCase(secondaryVideoCapture)
+            .build()
+
+        val primaryConfig = ConcurrentCamera.SingleCameraConfig(
+            pair.primarySelector,
+            primaryUseCaseGroup,
+            this,
+        )
+        val secondaryConfig = ConcurrentCamera.SingleCameraConfig(
+            pair.secondarySelector,
+            secondaryUseCaseGroup,
+            this,
+        )
+
+        Log.i(TAG, "📸 Binding concurrent cameras: primary=${pair.primarySelector}, secondary=${pair.secondarySelector}")
+        CameraDebugLog.append("📸 Binding concurrent cameras")
+
+        runOnMain {
+            try {
+                val concurrent = cameraProvider!!.bindToLifecycle(
+                    listOf(primaryConfig, secondaryConfig)
+                )
+
+                primary = RecordingStream(CameraPosition.fromLensString(settings.videoRecorderSettings.cameraLens)).apply {
+                    this.videoCapture = primaryVideoCapture
+                    this.camera = concurrent.cameras.getOrNull(0)
+                }
+                secondary = RecordingStream(CameraPosition.fromLensString(settings.videoRecorderSettings.secondaryCameraLens)).apply {
+                    this.videoCapture = secondaryVideoCapture
+                    this.camera = concurrent.cameras.getOrNull(1)
+                }
+
+                // Ensure secondary batches folder exists
+                if (secondaryBatchesFolder == null) {
+                    secondaryBatchesFolder = VideoBatchesFolder.viaInternalFolder(
+                        this@VideoRecorderService,
+                        secondary!!.position,
+                    ).also {
+                        it.sessionId = batchesFolder.sessionId
+                        it.initFolders()
+                    }
+                } else {
+                    secondaryBatchesFolder!!.sessionId = batchesFolder.sessionId
+                    secondaryBatchesFolder!!.initFolders()
+                }
+
+                if (cameraLensMode == "ultrawide") {
+                    engageUltraWide(primary.camera)
+                }
+
+                primary.camera?.let {
+                    cameraControl = CameraControl(it).also { ctrl -> ctrl.init() }
+                }
+                onCameraControlAvailable()
+                _cameraAvailableListener.complete(Unit)
+                Log.i(TAG, "📸 ✅ Concurrent cameras bound successfully!")
+                CameraDebugLog.append("📸 ✅ Concurrent cameras BOUND!")
+            } catch (e: Exception) {
+                Log.e(TAG, "📸 ❌ Dual camera binding failed: ${e.message}", e)
+                CameraDebugLog.append("📸 ❌ Dual camera bind failed: ${e.message}")
+                CameraDebugLog.flush()
+                // Fallback to single camera
+                isDualMode = false
+                openSingleCamera()
+            }
+        }
+    }
+
+    private fun openSingleCamera() {
         val userAspectRatio = settings.videoRecorderSettings.videoAspectRatio ?: "4:3"
 
         // Step 1: Try with user's preferred aspect ratio
@@ -415,7 +653,7 @@ class VideoRecorderService :
     }
 
     /**
-     * Attempt to bind the camera with the given aspect ratio.
+     * Attempt to bind the single camera with the given aspect ratio.
      * On success, engages ultra-wide via zoom ratio if cameraLensMode == "ultrawide".
      * Calls [onResult] with true if successful, false otherwise.
      */
@@ -424,36 +662,38 @@ class VideoRecorderService :
         onResult: ((Boolean) -> Unit)? = null,
     ) {
         val recorder = buildRecorder(aspectRatio)
-        videoCapture = buildVideoCapture(recorder)
+        val videoCap = buildVideoCapture(recorder)
+
+        primary = RecordingStream(CameraPosition.SINGLE).apply {
+            this.videoCapture = videoCap
+        }
 
         Log.i(TAG, "📸 Trying to bind camera [ratio=${aspectRatio ?: "4:3"}]...")
         CameraDebugLog.append("📸 Binding camera [ratio=${aspectRatio ?: "4:3"}]")
 
         runOnMain {
             try {
-                camera = cameraProvider!!.bindToLifecycle(
+                primary.camera = cameraProvider!!.bindToLifecycle(
                     this,
                     selectedCamera,
-                    videoCapture
+                    primary.videoCapture
                 )
 
-                val boundCameraId = camera?.cameraInfo?.let {
+                val boundCameraId = primary.camera?.cameraInfo?.let {
                     Camera2CameraInfo.from(it).cameraId
                 }
                 Log.i(TAG, "📸 ✅ Camera bound! ID=$boundCameraId, ratio=${aspectRatio ?: "4:3"}")
                 CameraDebugLog.append("📸 ✅ Camera BOUND! ID=$boundCameraId, ratio=${aspectRatio ?: "4:3"}")
 
                 // ── Ultra-wide engagement via zoom ratio ──
-                // Xiaomi HyperOS and similar OEM skins block direct physical-camera
-                // binding for third-party apps. The ONLY supported path is:
-                //   logical back camera + setZoomRatio(minZoomRatio)
-                // This lets the system HAL auto-switch to the UW hardware internally.
                 if (cameraLensMode == "ultrawide") {
-                    engageUltraWide()
+                    engageUltraWide(primary.camera)
                 }
 
-                cameraControl = CameraControl(camera!!).also {
-                    it.init()
+                primary.camera?.let {
+                    cameraControl = CameraControl(it).also { ctrl ->
+                        ctrl.init()
+                    }
                 }
                 onCameraControlAvailable()
                 _cameraAvailableListener.complete(Unit)
@@ -468,14 +708,9 @@ class VideoRecorderService :
 
     /**
      * Engage ultra-wide by setting the zoom ratio to the camera's minimum.
-     *
-     * This works on devices where the OEM exposes the UW sensor through
-     * the logical camera's zoom range (minZoomRatio < 1.0).
-     *
-     * On devices without UW hardware, minZoomRatio is 1.0 and this is a no-op.
      */
-    private fun engageUltraWide() {
-        val cameraInfo = camera?.cameraInfo ?: return
+    private fun engageUltraWide(cam: Camera? = primary.camera) {
+        val cameraInfo = cam?.cameraInfo ?: return
         val zoomState = cameraInfo.zoomState.value
         val minZoom = zoomState?.minZoomRatio ?: 1f
         val maxZoom = zoomState?.maxZoomRatio ?: 1f
@@ -484,7 +719,7 @@ class VideoRecorderService :
         CameraDebugLog.append("📸 Zoom state: min=$minZoom, max=$maxZoom")
 
         if (minZoom < 1.0f) {
-            camera?.cameraControl?.setZoomRatio(minZoom)
+            cam.cameraControl.setZoomRatio(minZoom)
             Log.i(TAG, "📸 ✅ Ultra-wide ENGAGED via zoom: ${"%.2f".format(minZoom)}x")
             CameraDebugLog.append("📸 ✅ UW ENGAGED via zoom: ${"%.2f".format(minZoom)}x")
         } else {
@@ -776,18 +1011,25 @@ class VideoRecorderService :
     // Used to close it finally, shouldn't be called when pausing / resuming.
     // This should only be called after recording has finished.
     private fun closeCamera() {
+        if (physicalDualRecorder != null) {
+            try {
+                physicalDualRecorder?.stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping physical dual recorder", e)
+            }
+            physicalDualRecorder = null
+        }
+
         runOnMain {
             runCatching {
                 cameraProvider?.unbindAll()
             }
             _cameraCloserListener.complete(Unit)
 
-            // Doesn't need to run on main thread, but
-            // if it runs outside `runOnMain`, `cameraProvider` is already null
-            // before it's unbound
             cameraProvider = null
-            videoCapture = null
-            camera = null
+            primary = RecordingStream(CameraPosition.SINGLE)
+            secondary = null
+            isDualMode = false
         }
     }
 
@@ -795,58 +1037,64 @@ class VideoRecorderService :
 
     private fun stopActiveRecording() {
         runCatching {
-            activeRecording?.stop()
+            primary.activeRecording?.stop()
+        }
+        runCatching {
+            secondary?.activeRecording?.stop()
         }
     }
 
-    private fun getNameForMediaFile(): String {
+    private fun getNameForMediaFile(folder: VideoBatchesFolder = batchesFolder): String {
         // Flat naming: alibi-video_recordings-{sessionId}-{counter}.mp4
         // Lexicographic sort = chronological (sessionId is a timestamp).
-        val sid = batchesFolder.sessionId ?: "00000000000000"
-        return "${batchesFolder.mediaPrefix}${sid}-%03d.%s".format(
+        val sid = folder.sessionId ?: "00000000000000"
+        return "${folder.mediaPrefix}${sid}-%03d.%s".format(
             counter, settings.videoRecorderSettings.fileExtension
         )
     }
 
     @SuppressLint("MissingPermission", "NewApi")
-    private fun prepareVideoRecording() =
-        videoCapture!!.output
+    private fun prepareVideoRecording(
+        videoCapture: VideoCapture<Recorder>,
+        folder: VideoBatchesFolder = batchesFolder,
+    ) =
+        videoCapture.output
             .let {
-                if (batchesFolder.type == BatchesFolder.BatchType.CUSTOM && SUPPORTS_SAVING_VIDEOS_IN_CUSTOM_FOLDERS) {
+                if (folder.type == BatchesFolder.BatchType.CUSTOM && SUPPORTS_SAVING_VIDEOS_IN_CUSTOM_FOLDERS) {
                     it.prepareRecording(
                         this,
                         FileDescriptorOutputOptions.Builder(
-                            batchesFolder.asCustomGetParcelFileDescriptor(
+                            folder.asCustomGetParcelFileDescriptor(
                                 counter,
                                 settings.videoRecorderSettings.fileExtension
                             )
                         ).build()
                     )
-                } else if (batchesFolder.type == BatchesFolder.BatchType.MEDIA) {
+                } else if (folder.type == BatchesFolder.BatchType.MEDIA) {
                     if (SUPPORTS_SCOPED_STORAGE) {
-                        val name = getNameForMediaFile()
+                        val name = getNameForMediaFile(folder)
 
                         it.prepareRecording(
                             this,
                             MediaStoreOutputOptions
                                 .Builder(
                                     contentResolver,
-                                    batchesFolder.scopedMediaContentUri,
+                                    folder.scopedMediaContentUri,
                                 )
                                 .setContentValues(
-                                    batchesFolder.asMediaGetScopedStorageContentValues(
+                                    folder.asMediaGetScopedStorageContentValues(
                                         name
                                     )
                                 )
                                 .build()
                         )
                     } else {
-                        val name = getNameForMediaFile()
+                        val name = getNameForMediaFile(folder)
 
                         it.prepareRecording(
                             this,
                             FileOutputOptions
-                                .Builder(batchesFolder.asMediaGetLegacyFile(name))
+                                .Builder(folder.asMediaGetLegacyFile(name))
                                 .build()
                         )
                     }
@@ -854,7 +1102,7 @@ class VideoRecorderService :
                     it.prepareRecording(
                         this,
                         FileOutputOptions.Builder(
-                            batchesFolder.asInternalGetFile(
+                            folder.asInternalGetFile(
                                 counter,
                                 settings.videoRecorderSettings.fileExtension
                             ).apply {

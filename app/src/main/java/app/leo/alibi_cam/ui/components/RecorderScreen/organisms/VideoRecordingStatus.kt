@@ -248,10 +248,6 @@ fun _PrimitiveControls(videoRecorder: VideoRecorderModel) {
                     videoRecorder.destroyService(context)
                 }
                 Log.i("Alibi", "===== Destroying service... done")
-
-                // 关闭 App（同 auto-stop）
-                val am = context.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-                am.appTasks.forEach { it.finishAndRemoveTask() }
             }
         },
         onSaveCurrent = {

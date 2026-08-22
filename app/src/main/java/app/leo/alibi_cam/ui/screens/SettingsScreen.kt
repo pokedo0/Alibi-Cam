@@ -65,6 +65,7 @@ import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.PermanentlyDeleteRec
 import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.MaxDurationTile
 import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.SaveFolderTile
 import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.CameraLensTile
+import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.DualCameraTile
 import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.VideoAspectRatioTile
 import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.AutoRecordOnAppOpenTile
 import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.AutoStopSensorTile
@@ -209,6 +210,7 @@ fun SettingsScreen(
                         VideoRecorderQualityTile(settings = settings)
                         VideoRecorderBitrateTile(settings = settings)
                         VideoRecorderFrameRateTile(settings = settings)
+                        DualCameraTile(settings = settings)
                         CameraLensTile(settings = settings)
                         VideoAspectRatioTile(settings = settings)
                     }

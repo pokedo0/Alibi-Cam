@@ -25,7 +25,8 @@ class VideoBatchesFolder(
     override val context: Context,
     override val type: BatchType,
     override val customFolder: DocumentFile? = null,
-    override val subfolderName: String = VIDEO_RECORDING_BATCHES_SUBFOLDER_NAME,
+    val cameraPosition: CameraPosition = CameraPosition.SINGLE,
+    override val subfolderName: String = VIDEO_RECORDING_BATCHES_SUBFOLDER_NAME + cameraPosition.folderSuffix,
 ) : BatchesFolder(
     context,
     type,
@@ -528,20 +529,34 @@ class VideoBatchesFolder(
         // where MediaStore.DURATION is not available.
         private const val TYPICAL_BITRATE_BPS = 2_000_000L
 
-        fun viaInternalFolder(context: Context) = VideoBatchesFolder(context, BatchType.INTERNAL)
+        fun viaInternalFolder(
+            context: Context,
+            cameraPosition: CameraPosition = CameraPosition.SINGLE,
+        ) = VideoBatchesFolder(context, BatchType.INTERNAL, cameraPosition = cameraPosition)
 
-        fun viaCustomFolder(context: Context, folder: DocumentFile) =
-            VideoBatchesFolder(context, BatchType.CUSTOM, folder)
+        fun viaCustomFolder(
+            context: Context,
+            folder: DocumentFile,
+            cameraPosition: CameraPosition = CameraPosition.SINGLE,
+        ) = VideoBatchesFolder(context, BatchType.CUSTOM, folder, cameraPosition = cameraPosition)
 
-        fun viaMediaFolder(context: Context) = VideoBatchesFolder(context, BatchType.MEDIA)
+        fun viaMediaFolder(
+            context: Context,
+            cameraPosition: CameraPosition = CameraPosition.SINGLE,
+        ) = VideoBatchesFolder(context, BatchType.MEDIA, cameraPosition = cameraPosition)
 
-        fun importFromFolder(folder: String?, context: Context) = when (folder) {
-            null -> viaInternalFolder(context)
-            RECORDER_INTERNAL_SELECTED_VALUE -> viaInternalFolder(context)
-            RECORDER_MEDIA_SELECTED_VALUE -> viaMediaFolder(context)
+        fun importFromFolder(
+            folder: String?,
+            context: Context,
+            cameraPosition: CameraPosition = CameraPosition.SINGLE,
+        ) = when (folder) {
+            null -> viaInternalFolder(context, cameraPosition)
+            RECORDER_INTERNAL_SELECTED_VALUE -> viaInternalFolder(context, cameraPosition)
+            RECORDER_MEDIA_SELECTED_VALUE -> viaMediaFolder(context, cameraPosition)
             else -> viaCustomFolder(
                 context,
-                DocumentFile.fromTreeUri(context, Uri.parse(folder))!!
+                DocumentFile.fromTreeUri(context, Uri.parse(folder))!!,
+                cameraPosition,
             )
         }
 

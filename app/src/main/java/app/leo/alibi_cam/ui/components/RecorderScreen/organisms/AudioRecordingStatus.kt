@@ -1,6 +1,7 @@
 package app.leo.alibi_cam.ui.components.RecorderScreen.organisms
 
 import android.content.res.Configuration
+import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -166,22 +167,27 @@ fun _PrimitiveControls(audioRecorder: AudioRecorderModel) {
             }
         },
         onSaveAndStop = {
+            Log.i("Alibi", "User initiated audio recording save and stop")
             scope.launch {
+                Log.i("Alibi", "====== Asking to stop audio recording...")
                 audioRecorder.stopRecording(context)
+                Log.i("Alibi", "====== Asking to stop audio recording... done")
 
+                Log.i("Alibi", "====== Updating data store for audio recording...")
                 dataStore.updateData {
                     it.saveLastRecording(audioRecorder as RecorderModel)
                 }
+                Log.i("Alibi", "====== Updating data store for audio recording... done")
 
+                Log.i("Alibi", "===== Asking to save audio recording...")
                 audioRecorder.onRecordingSave(false).join()
+                Log.i("Alibi", "===== Asking to save audio recording... done")
 
+                Log.i("Alibi", "===== Destroying audio service...")
                 runCatching {
                     audioRecorder.destroyService(context)
                 }
-
-                // 关闭 App（同 auto-stop）
-                val am = context.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-                am.appTasks.forEach { it.finishAndRemoveTask() }
+                Log.i("Alibi", "===== Destroying audio service... done")
             }
         },
         onSaveCurrent = {

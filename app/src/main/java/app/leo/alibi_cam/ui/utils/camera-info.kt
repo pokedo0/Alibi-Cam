@@ -25,7 +25,8 @@ data class CameraInfo(
         BACK(CameraSelector.LENS_FACING_BACK),
         FRONT(CameraSelector.LENS_FACING_FRONT),
         EXTERNAL(CameraSelector.LENS_FACING_EXTERNAL),
-        ULTRA_WIDE(-1),   // Logical marker — actual UW is zoom-driven, not ID-driven
+        ULTRA_WIDE(-1),   // Logical or physical UW (focal < 3.5mm)
+        TELEPHOTO(-2),    // Physical telephoto (focal > 10.0mm)
         UNKNOWN(999),
     }
 
@@ -33,7 +34,12 @@ data class CameraInfo(
         get() = when (lensFacing) {
             CameraSelector.LENS_FACING_FRONT -> Lens.FRONT
             CameraSelector.LENS_FACING_EXTERNAL -> Lens.EXTERNAL
-            CameraSelector.LENS_FACING_BACK -> Lens.BACK
+            CameraSelector.LENS_FACING_BACK -> {
+                val f = focalLength ?: 6.5f
+                if (f < 3.5f) Lens.ULTRA_WIDE
+                else if (f > 10.0f) Lens.TELEPHOTO
+                else Lens.BACK
+            }
             else -> Lens.UNKNOWN
         }
 
@@ -61,11 +67,26 @@ data class CameraInfo(
 
             CameraDebugLog.init(context)
 
+            val rawIdList = cameraManager.cameraIdList.toList()
             Log.i(TAG, "═══════════════════════════════════════════")
-            Log.i(TAG, "🔍 Enumerating logical cameras via CameraManager")
+            Log.i(TAG, "🔍 Camera enumeration (package: ${context.packageName})")
+            Log.i(TAG, "📦 Raw cameraManager.cameraIdList = $rawIdList")
             Log.i(TAG, "═══════════════════════════════════════════")
             CameraDebugLog.append("═══════════════════════════")
-            CameraDebugLog.append("🔍 Camera enumeration (logical only)")
+            CameraDebugLog.append("🔍 Camera enumeration (pkg: ${context.packageName})")
+            CameraDebugLog.append("📦 Raw cameraIdList: $rawIdList")
+
+            // Log concurrent camera combinations if supported by system
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val concurrentSets = cameraManager.concurrentCameraIds
+                    Log.i(TAG, "⚡ CameraManager.getConcurrentCameraIds() = $concurrentSets")
+                    CameraDebugLog.append("⚡ ConcurrentCameraIds: $concurrentSets")
+                } catch (e: Exception) {
+                    Log.w(TAG, "⚠️ Failed to get concurrent camera ids: ${e.message}")
+                    CameraDebugLog.append("⚠️ ConcurrentCameraIds err: ${e.message}")
+                }
+            }
             CameraDebugLog.append("═══════════════════════════")
 
             cameraManager.cameraIdList.forEach { cameraId ->
@@ -74,17 +95,14 @@ data class CameraInfo(
                     val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
                         ?: return@forEach
 
-                    // Only process logical cameras (skip physical sub-cameras)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        val logicalParent = characteristics
-                            .get(CameraCharacteristics.LENS_FACING) // Same field, but check if this is a logical camera
-                        // Physical cameras that are children of a logical multi-camera
-                        // have no direct binding path on restrictive OEMs — skip them
-                    }
-
                     val focalLengths = characteristics
                         .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                     val minFocalLength = focalLengths?.minOrNull()
+                    val allFocals = focalLengths?.joinToString(", ") ?: "none"
+
+                    val physicalIds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        characteristics.physicalCameraIds.joinToString(", ")
+                    } else "N/A"
 
                     val facingLabel = when (lensFacing) {
                         CameraSelector.LENS_FACING_BACK -> "BACK"
@@ -93,8 +111,8 @@ data class CameraInfo(
                         else -> "UNKNOWN($lensFacing)"
                     }
 
-                    Log.i(TAG, "  Camera [$cameraId]: facing=$facingLabel, focal=$minFocalLength")
-                    CameraDebugLog.append("  [$cameraId] $facingLabel focal=$minFocalLength")
+                    Log.i(TAG, "  Camera [$cameraId]: facing=$facingLabel, minFocal=$minFocalLength (focals: $allFocals), physicalIds=[$physicalIds]")
+                    CameraDebugLog.append("  [$cameraId] $facingLabel focal=$minFocalLength focals=[$allFocals] physical=[$physicalIds]")
 
                     allCameras.add(
                         CameraInfo(
@@ -164,6 +182,17 @@ data class CameraInfo(
                     } else {
                         Log.w(TAG, "🎯 Main requested but no back camera → front")
                         CameraDebugLog.append("  → Main mode: no back camera, using front")
+                        Pair(CameraSelector.LENS_FACING_FRONT, null)
+                    }
+                }
+                "telephoto" -> {
+                    if (hasBackCamera) {
+                        Log.i(TAG, "🎯 Telephoto mode → back camera (physical telephoto ID 3 or focal > 10)")
+                        CameraDebugLog.append("  → Telephoto mode: BACK (telephoto)")
+                        Pair(CameraSelector.LENS_FACING_BACK, "telephoto")
+                    } else {
+                        Log.w(TAG, "🎯 Telephoto requested but no back camera → front")
+                        CameraDebugLog.append("  → Telephoto mode: no back camera, using front")
                         Pair(CameraSelector.LENS_FACING_FRONT, null)
                     }
                 }

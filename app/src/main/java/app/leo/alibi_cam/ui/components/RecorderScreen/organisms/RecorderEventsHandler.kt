@@ -224,8 +224,8 @@ fun RecorderEventsHandler(
                             // doesn't match INTERNAL flat-storage naming (1.mp4, 2.mp4…).
                             val internalDir = batchesFolder.getInternalFolder()
                             val chunkFiles = (internalDir.listFiles()
-                                ?.filter { it.isFile && it.nameWithoutExtension.toIntOrNull() != null }
-                                ?.sortedBy { it.nameWithoutExtension.toInt() }
+                                ?.filter { it.isFile && (it.nameWithoutExtension.toLongOrNull() != null || it.name.startsWith(batchesFolder.mediaPrefix)) }
+                                ?.sortedBy { it.name }
                                 ?: emptyList())
                             if (chunkFiles.isNotEmpty()) {
                                 when (batchesFolder) {

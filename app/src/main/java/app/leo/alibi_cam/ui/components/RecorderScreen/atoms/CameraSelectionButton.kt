@@ -12,9 +12,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Camera
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.QuestionMark
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
@@ -36,6 +38,7 @@ fun CameraSelectionButton(
     onSelected: () -> Unit,
     label: String,
     description: String? = null,
+    isMultiSelect: Boolean = false,
 ) {
     val backgroundColor by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.secondaryContainer.copy(
@@ -62,10 +65,17 @@ fun CameraSelectionButton(
         Row(
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            RadioButton(
-                selected = selected,
-                onClick = onSelected,
-            )
+            if (isMultiSelect) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = { onSelected() },
+                )
+            } else {
+                RadioButton(
+                    selected = selected,
+                    onClick = onSelected,
+                )
+            }
             if (description == null) {
                 Text(
                     label,
@@ -100,5 +110,6 @@ val CAMERA_LENS_ICON_MAP = mapOf(
     CameraInfo.Lens.FRONT to Icons.Default.Person,
     CameraInfo.Lens.EXTERNAL to Icons.Default.Videocam,
     CameraInfo.Lens.ULTRA_WIDE to Icons.Default.Videocam,
+    CameraInfo.Lens.TELEPHOTO to Icons.Default.CameraAlt,
     CameraInfo.Lens.UNKNOWN to Icons.Default.QuestionMark,
 )

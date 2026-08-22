@@ -1,6 +1,6 @@
 package app.leo.alibi_cam.ui.components.SettingsScreen.Tiles
 
-import androidx.camera.core.CameraSelector
+import android.util.Log
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material3.Button
@@ -37,18 +37,30 @@ fun CameraLensTile(
     val showDialog = rememberUseCaseState()
     val dataStore = LocalContext.current.dataStore
 
+    val isDualMode = settings.videoRecorderSettings.dualCameraEnabled
+
     val options = listOf(
         "auto" to stringResource(R.string.ui_settings_value_cameraLens_auto),
-        "ultrawide" to stringResource(R.string.ui_settings_value_cameraLens_ultrawide),
         "main" to stringResource(R.string.ui_settings_value_cameraLens_main),
+        "ultrawide" to stringResource(R.string.ui_settings_value_cameraLens_ultrawide),
+        "telephoto" to stringResource(R.string.ui_settings_value_cameraLens_telephoto),
         "front" to stringResource(R.string.ui_settings_value_cameraLens_front),
     )
 
-    val currentValue = settings.videoRecorderSettings.cameraLens ?: "auto"
-    val currentLabel = options.firstOrNull { it.first == currentValue }?.second
-        ?: stringResource(R.string.ui_settings_value_auto_label)
+    val currentPrimary = settings.videoRecorderSettings.cameraLens ?: "auto"
+    val currentSecondary = settings.videoRecorderSettings.secondaryCameraLens
 
-    fun updateValue(value: String?) {
+    // Display label
+    val currentLabel = if (isDualMode && currentSecondary != null) {
+        val primaryLabel = options.firstOrNull { it.first == currentPrimary }?.second ?: currentPrimary
+        val secondaryLabel = options.firstOrNull { it.first == currentSecondary }?.second ?: currentSecondary
+        "$primaryLabel + $secondaryLabel"
+    } else {
+        options.firstOrNull { it.first == currentPrimary }?.second
+            ?: stringResource(R.string.ui_settings_value_auto_label)
+    }
+
+    fun updateSingleValue(value: String?) {
         scope.launch {
             dataStore.updateData {
                 it.setVideoRecorderSettings(
@@ -58,31 +70,92 @@ fun CameraLensTile(
         }
     }
 
-    ListDialog(
-        state = showDialog,
-        header = Header.Default(
-            title = stringResource(R.string.ui_settings_option_cameraLensTile_title),
-            icon = IconSource(
-                painter = IconResource.fromImageVector(Icons.Default.CameraAlt)
-                    .asPainterResource(),
-                contentDescription = null,
-            ),
-        ),
-        selection = ListSelection.Single(
-            showRadioButtons = true,
-            options = options.map { (value, label) ->
-                ListOption(
-                    titleText = label,
-                    selected = (settings.videoRecorderSettings.cameraLens ?: "auto") == value,
+    fun updateDualValues(primaryIndex: Int, secondaryIndex: Int?) {
+        scope.launch {
+            val primaryValue = options[primaryIndex].first
+            val secondaryValue = secondaryIndex?.let { options[it].first }
+            Log.i("CameraLensTile", "🎬 Dual camera: primary=$primaryValue, secondary=$secondaryValue")
+            dataStore.updateData {
+                it.setVideoRecorderSettings(
+                    it.videoRecorderSettings
+                        .setCameraLens(if (primaryValue == "auto") null else primaryValue)
+                        .setSecondaryCameraLens(secondaryValue)
                 )
             }
-        ) { index, _ ->
-            val selectedValue = options[index].first
-            updateValue(if (selectedValue == "auto") null else selectedValue)
-        },
-    )
+        }
+    }
+
+    if (isDualMode) {
+        // ── Dual Camera Mode: Multi-select (max 2) ──
+        // Compute which indices are currently selected
+        val selectedIndices = mutableListOf<Int>()
+        val primaryIdx = options.indexOfFirst { it.first == currentPrimary }
+        if (primaryIdx >= 0) selectedIndices.add(primaryIdx)
+        if (currentSecondary != null) {
+            val secondaryIdx = options.indexOfFirst { it.first == currentSecondary }
+            if (secondaryIdx >= 0 && secondaryIdx != primaryIdx) {
+                selectedIndices.add(secondaryIdx)
+            }
+        }
+
+        ListDialog(
+            state = showDialog,
+            header = Header.Default(
+                title = stringResource(R.string.ui_settings_option_cameraLensTile_title) +
+                    " (" + stringResource(R.string.ui_settings_value_cameraLens_selectTwo) + ")",
+                icon = IconSource(
+                    painter = IconResource.fromImageVector(Icons.Default.CameraAlt)
+                        .asPainterResource(),
+                    contentDescription = null,
+                ),
+            ),
+            selection = ListSelection.Multiple(
+                showCheckBoxes = true,
+                maxChoices = 2,
+                minChoices = 1,
+                options = options.mapIndexed { index, (_, label) ->
+                    ListOption(
+                        titleText = label,
+                        selected = index in selectedIndices,
+                    )
+                }
+            ) { indices, _ ->
+                val sortedIndices = indices.sorted()
+                val primary = sortedIndices.firstOrNull() ?: 0
+                val secondary = sortedIndices.getOrNull(1)
+                updateDualValues(primary, secondary)
+            },
+        )
+    } else {
+        // ── Single Camera Mode: Radio button selection ──
+        ListDialog(
+            state = showDialog,
+            header = Header.Default(
+                title = stringResource(R.string.ui_settings_option_cameraLensTile_title),
+                icon = IconSource(
+                    painter = IconResource.fromImageVector(Icons.Default.CameraAlt)
+                        .asPainterResource(),
+                    contentDescription = null,
+                ),
+            ),
+            selection = ListSelection.Single(
+                showRadioButtons = true,
+                options = options.map { (value, label) ->
+                    ListOption(
+                        titleText = label,
+                        selected = (settings.videoRecorderSettings.cameraLens ?: "auto") == value,
+                    )
+                }
+            ) { index, _ ->
+                val selectedValue = options[index].first
+                updateSingleValue(if (selectedValue == "auto") null else selectedValue)
+            },
+        )
+    }
+
     SettingsTile(
         title = stringResource(R.string.ui_settings_option_cameraLensTile_title),
+        description = if (isDualMode) stringResource(R.string.ui_settings_value_cameraLens_selectTwo) else null,
         leading = {
             Icon(
                 Icons.Default.CameraAlt,
@@ -101,11 +174,13 @@ fun CameraLensTile(
             }
         },
         extra = {
-            ExampleListRoulette(
-                items = listOf(null, "auto", "ultrawide", "main", "front"),
-                onItemSelected = ::updateValue,
-            ) {
-                Text(stringResource(R.string.ui_settings_value_auto_label))
+            if (!isDualMode) {
+                ExampleListRoulette(
+                    items = listOf(null, "auto", "main", "ultrawide", "telephoto", "front"),
+                    onItemSelected = ::updateSingleValue,
+                ) {
+                    Text(stringResource(R.string.ui_settings_value_auto_label))
+                }
             }
         },
     )

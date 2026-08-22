@@ -539,6 +539,14 @@ data class VideoRecorderSettings(
     val cameraLens: String? = null,
     // Video aspect ratio: null or "4:3" = 4:3 (default), "16:9" = 16:9
     val videoAspectRatio: String? = null,
+    // ── Dual Camera Recording ──
+    // Enables simultaneous recording from two cameras.
+    // Requires hardware support (ConcurrentCamera, Android 11+).
+    val dualCameraEnabled: Boolean = false,
+    // Secondary camera lens in dual mode: "front", "main", "ultrawide", null.
+    // When dualCameraEnabled is true, the primary lens is 'cameraLens' and
+    // the secondary lens is 'secondaryCameraLens'. Both files are saved separately.
+    val secondaryCameraLens: String? = null,
 ) {
     fun setTargetedVideoBitRate(bitRate: Int?): VideoRecorderSettings {
         return copy(targetedVideoBitRate = bitRate)
@@ -560,6 +568,14 @@ data class VideoRecorderSettings(
 
     fun setVideoAspectRatio(aspectRatio: String?): VideoRecorderSettings {
         return copy(videoAspectRatio = aspectRatio)
+    }
+
+    fun setDualCameraEnabled(enabled: Boolean): VideoRecorderSettings {
+        return copy(dualCameraEnabled = enabled)
+    }
+
+    fun setSecondaryCameraLens(lens: String?): VideoRecorderSettings {
+        return copy(secondaryCameraLens = lens)
     }
 
     fun getQuality(): Quality? =
