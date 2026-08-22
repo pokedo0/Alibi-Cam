@@ -18,21 +18,31 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
+import android.view.WindowManager
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import app.leo.alibi_cam.db.AppSettings
+import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.ReturnCode
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.Closeable
 import java.io.File
+import kotlin.coroutines.resume
 
 /**
  * Camera2-based Physical Dual Camera Recorder.
  *
  * Uses Android 9+ (API 28) Logical Multi-Camera physical streams:
- * - Opens logical back camera ("0")
- * - Binds Primary MediaRecorder to physical sensor (e.g. ID "2" for main, "4" for ultrawide)
- * - Binds Secondary MediaRecorder to physical sensor (e.g. ID "3" for telephoto)
+ * - Opens the selected logical back camera
+ * - Binds each MediaRecorder to a selected physical sensor
  * - Records simultaneously and saves into separate VideoBatchesFolders.
  * - Handles MediaStore IS_PENDING commitment so files appear in the gallery.
  */
@@ -40,6 +50,7 @@ import java.io.File
 class Camera2PhysicalDualRecorder(
     private val context: Context,
     private val settings: AppSettings,
+    private val logicalCameraId: String,
     private val primaryPhysicalId: String,
     private val secondaryPhysicalId: String,
     private val primaryFolder: VideoBatchesFolder,
@@ -50,6 +61,7 @@ class Camera2PhysicalDualRecorder(
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
+    private var captureSessionReady: CompletableDeferred<Unit>? = null
 
     private var primaryRecorder: MediaRecorder? = null
     private var secondaryRecorder: MediaRecorder? = null
@@ -60,11 +72,42 @@ class Camera2PhysicalDualRecorder(
     private var backgroundHandler: Handler? = null
 
     private val pendingUris = mutableListOf<Uri>()
+    private val outputDescriptors = mutableListOf<ParcelFileDescriptor>()
+    private val segmentTargets = linkedMapOf<Long, SegmentTargets>()
+    private var currentCounter: Long? = null
+
+    private data class OutputTarget(
+        val uri: Uri? = null,
+        val file: File? = null,
+        val descriptor: ParcelFileDescriptor? = null,
+        val label: String,
+    )
+
+    private data class FfmpegInput(
+        val path: String,
+        val fd: Int? = null,
+        val descriptor: ParcelFileDescriptor? = null,
+    ) : Closeable {
+        override fun close() {
+            runCatching { descriptor?.close() }
+        }
+    }
+
+    private data class SegmentTargets(
+        val primary: OutputTarget,
+        val secondary: OutputTarget,
+    )
+
+    private data class PreparedRecorder(
+        val recorder: MediaRecorder,
+        val target: OutputTarget,
+    )
 
     var isRecording: Boolean = false
         private set
 
     private fun startBackgroundThread() {
+        if (backgroundThread?.isAlive == true) return
         backgroundThread = HandlerThread("Camera2PhysicalRecorder").also { it.start() }
         backgroundHandler = Handler(backgroundThread!!.looper)
     }
@@ -86,6 +129,7 @@ class Camera2PhysicalDualRecorder(
         onStarted: () -> Unit,
         onError: (String) -> Unit,
     ) {
+        currentCounter = counter
         Log.i(TAG, "🎬 Starting Camera2PhysicalDualRecorder: primary=$primaryPhysicalId, secondary=$secondaryPhysicalId, counter=$counter, audio=$enableAudio")
         CameraDebugLog.append("🎬 Start Camera2Physical: prim=$primaryPhysicalId, sec=$secondaryPhysicalId, count=$counter, audio=$enableAudio")
 
@@ -93,19 +137,22 @@ class Camera2PhysicalDualRecorder(
 
         try {
             // Primary gets audio if enabled, secondary is video-only to prevent microphone collision
-            primaryRecorder = createMediaRecorder(primaryFolder, primaryPhysicalId, counter, includeAudio = enableAudio)
-            secondaryRecorder = createMediaRecorder(secondaryFolder, secondaryPhysicalId, counter, includeAudio = false)
+            val primary = createMediaRecorder(primaryFolder, primaryPhysicalId, counter, includeAudio = enableAudio)
+            val secondary = createMediaRecorder(secondaryFolder, secondaryPhysicalId, counter, includeAudio = false)
+            primaryRecorder = primary.recorder
+            secondaryRecorder = secondary.recorder
+            segmentTargets[counter] = SegmentTargets(primary.target, secondary.target)
 
             primarySurface = primaryRecorder!!.surface
             secondarySurface = secondaryRecorder!!.surface
 
             cameraManager.openCamera(
-                "0",
+                logicalCameraId,
                 object : CameraDevice.StateCallback() {
                     override fun onOpened(device: CameraDevice) {
                         cameraDevice = device
-                        Log.i(TAG, "📸 Camera 0 opened for physical dual streaming")
-                        CameraDebugLog.append("📸 Camera 0 opened for physical dual streaming")
+                        Log.i(TAG, "📸 Camera $logicalCameraId opened for physical dual streaming")
+                        CameraDebugLog.append("📸 Camera $logicalCameraId opened for physical dual streaming")
 
                         createDualCaptureSession(onStarted, onError)
                     }
@@ -118,7 +165,7 @@ class Camera2PhysicalDualRecorder(
                     }
 
                     override fun onError(device: CameraDevice, error: Int) {
-                        val errMsg = "Camera 0 open error: $error"
+                        val errMsg = "Camera $logicalCameraId open error: $error"
                         Log.e(TAG, "📸 ❌ $errMsg")
                         CameraDebugLog.append("📸 ❌ $errMsg")
                         CameraDebugLog.flush()
@@ -219,6 +266,11 @@ class Camera2PhysicalDualRecorder(
                     }
                 }
 
+                override fun onReady(session: CameraCaptureSession) {
+                    Log.i(TAG, "📸 Capture session ready for recorder stop")
+                    captureSessionReady?.complete(Unit)
+                }
+
                 override fun onConfigureFailed(session: CameraCaptureSession) {
                     val msg = "Physical dual session configuration failed"
                     Log.e(TAG, msg)
@@ -270,7 +322,7 @@ class Camera2PhysicalDualRecorder(
         physicalCameraId: String,
         counter: Long,
         includeAudio: Boolean,
-    ): MediaRecorder {
+    ): PreparedRecorder {
         val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(context)
         } else {
@@ -305,100 +357,160 @@ class Camera2PhysicalDualRecorder(
             }
 
             // Set output file target
-            setupOutputFile(this, folder, counter)
+            val outputTarget = setupOutputFile(this, folder, counter)
+
+            val orientationHint = getOrientationHint(physicalCameraId)
+            setOrientationHint(orientationHint)
+            Log.i(TAG, "🧭 orientation physical=$physicalCameraId, hint=$orientationHint")
+            CameraDebugLog.append("🧭 Orientation physical=$physicalCameraId hint=$orientationHint")
 
             prepare()
-        }
 
-        return recorder
+            return PreparedRecorder(this, outputTarget)
+        }
     }
 
-    private fun setupOutputFile(recorder: MediaRecorder, folder: VideoBatchesFolder, counter: Long) {
-        val ext = settings.videoRecorderSettings.fileExtension
-        val sid = folder.sessionId ?: ""
-        val fileName = "${folder.mediaPrefix}${sid}-%03d.%s".format(counter, ext)
+    private fun getOrientationHint(physicalCameraId: String): Int {
+        val sensorOrientation = runCatching {
+            cameraManager.getCameraCharacteristics(physicalCameraId)
+                .get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        }.getOrElse {
+            Log.w(TAG, "🧭 Failed to query sensor orientation for $physicalCameraId", it)
+            0
+        }
+        val displayRotation = runCatching {
+            context.getSystemService(WindowManager::class.java)?.defaultDisplay?.rotation ?: Surface.ROTATION_0
+        }.getOrDefault(Surface.ROTATION_0)
+        val deviceRotation = when (displayRotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        val hint = (sensorOrientation - deviceRotation + 360) % 360
+        Log.i(TAG, "🧭 orientation details physical=$physicalCameraId sensor=$sensorOrientation displayRotation=$displayRotation deviceDegrees=$deviceRotation hint=$hint")
+        CameraDebugLog.append("🧭 Orientation details id=$physicalCameraId sensor=$sensorOrientation display=$displayRotation hint=$hint")
+        return hint
+    }
 
-        when (folder.type) {
+    private fun setupOutputFile(
+        recorder: MediaRecorder,
+        folder: VideoBatchesFolder,
+        counter: Long,
+    ): OutputTarget {
+        val ext = settings.videoRecorderSettings.fileExtension
+        val fileName = getOutputFileName(folder, counter, ext)
+        val target = createOutputTarget(folder, fileName, counter, ext)
+        setRecorderOutputFile(recorder, target)
+        Log.i(TAG, "📁 outputFile: ${target.label}")
+        return target
+    }
+
+    private fun getOutputFileName(folder: VideoBatchesFolder, counter: Long, ext: String): String {
+        val sid = folder.sessionId ?: ""
+        return "${folder.mediaPrefix}${sid}-%03d.%s".format(counter, ext)
+    }
+
+    private fun createOutputTarget(
+        folder: VideoBatchesFolder,
+        fileName: String,
+        counter: Long,
+        ext: String,
+    ): OutputTarget {
+        return when (folder.type) {
             BatchesFolder.BatchType.INTERNAL -> {
-                val file = folder.asInternalGetFile(counter, ext)
-                recorder.setOutputFile(file.absolutePath)
-                Log.i(TAG, "📁 outputFile (INTERNAL): ${file.absolutePath}")
+                OutputTarget(file = folder.asInternalGetFile(counter, ext), label = fileName).also {
+                    it.file!!.parentFile?.mkdirs()
+                }
             }
             BatchesFolder.BatchType.CUSTOM -> {
-                val pfd = folder.asCustomGetParcelFileDescriptor(counter, ext)
-                recorder.setOutputFile(pfd.fileDescriptor)
-                Log.i(TAG, "📁 outputFile (CUSTOM): fd=${pfd.fd}")
+                val parent = if (folder.taskFolderName != null) {
+                    folder.getCustomDefinedFolder().findFile(folder.taskFolderName!!)
+                        ?: folder.getCustomDefinedFolder().createDirectory(folder.taskFolderName!!)
+                } else {
+                    folder.getCustomDefinedFolder()
+                } ?: error("Custom output folder unavailable")
+                val actualName = if (folder.taskFolderName != null) {
+                    "%03d.%s".format(counter, ext)
+                } else {
+                    "$counter.$ext"
+                }
+                val file = parent.createFile("video/$ext", actualName)
+                    ?: error("Cannot create custom output file $actualName")
+                val descriptor = context.contentResolver.openFileDescriptor(file.uri, "w")
+                    ?: error("Cannot open custom output file $actualName")
+                outputDescriptors += descriptor
+                OutputTarget(uri = file.uri, descriptor = descriptor, label = file.uri.toString())
             }
             BatchesFolder.BatchType.MEDIA -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val values = folder.asMediaGetScopedStorageContentValues(fileName)
-                    val uri = context.contentResolver.insert(folder.scopedMediaContentUri, values)
-                    if (uri != null) {
-                        synchronized(pendingUris) { pendingUris.add(uri) }
-                        val pfd = context.contentResolver.openFileDescriptor(uri, "w")!!
-                        recorder.setOutputFile(pfd.fileDescriptor)
-                        Log.i(TAG, "📁 outputFile (MEDIA URI): $uri")
-                    }
+                    val uri = context.contentResolver.insert(
+                        folder.scopedMediaContentUri,
+                        folder.asMediaGetScopedStorageContentValues(fileName),
+                    ) ?: error("Cannot insert MediaStore output $fileName")
+                    synchronized(pendingUris) { pendingUris.add(uri) }
+                    val descriptor = context.contentResolver.openFileDescriptor(uri, "w")
+                        ?: error("Cannot open MediaStore output $uri")
+                    outputDescriptors += descriptor
+                    OutputTarget(uri = uri, descriptor = descriptor, label = uri.toString())
                 } else {
-                    val file = File(folder.legacyMediaFolder, fileName)
-                    recorder.setOutputFile(file.absolutePath)
-                    Log.i(TAG, "📁 outputFile (LEGACY): ${file.absolutePath}")
+                    OutputTarget(file = File(folder.legacyMediaFolder, fileName), label = fileName).also {
+                        it.file!!.parentFile?.mkdirs()
+                    }
                 }
             }
         }
+    }
+
+    private fun setRecorderOutputFile(recorder: MediaRecorder, target: OutputTarget) {
+        target.descriptor?.let { recorder.setOutputFile(it.fileDescriptor) }
+            ?: target.file?.let { recorder.setOutputFile(it.absolutePath) }
+            ?: error("Output target has no writable destination")
     }
 
     /**
-     * Rotate chunk output files for the next cycle without interrupting capture.
+     * Rotate to a new time-based segment. MediaRecorder.setNextOutputFile()
+     * cannot force a time boundary; it only queues a file for size rollover.
+     * We therefore finalize the current pair and recreate both recorders and
+     * their physical Camera2 session.
      */
-    fun rotateNextChunk(counter: Long) {
-        try {
-            val ext = settings.videoRecorderSettings.fileExtension
-
-            // First commit current pending URIs so existing chunks become visible
-            commitPendingUris()
-
-            // Primary next chunk
-            setupNextOutputFile(primaryRecorder, primaryFolder, counter, ext)
-            // Secondary next chunk
-            setupNextOutputFile(secondaryRecorder, secondaryFolder, counter, ext)
-
-            Log.i(TAG, "🔄 Rotated to chunk #$counter for physical streams [$primaryPhysicalId, $secondaryPhysicalId]")
-            CameraDebugLog.append("🔄 Physical dual rotated to chunk #$counter")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to rotate next chunk for physical streams", e)
-            CameraDebugLog.append("⚠️ Physical dual chunk rotation err: ${e.message}")
+    suspend fun rotateNextChunk(counter: Long): Boolean {
+        if (counter <= (currentCounter ?: Long.MIN_VALUE)) {
+            Log.d(TAG, "🔄 Skipping physical chunk rotation for already active counter=$counter")
+            return true
         }
+
+        Log.i(TAG, "🔄 Rotating physical segment: current=$currentCounter next=$counter")
+        CameraDebugLog.append("🔄 Physical segment restart: current=$currentCounter next=$counter")
+        isRecording = false
+        stopCurrentCaptureAndRecorders(stopBackground = false)
+
+        val started = startAndAwait(counter)
+        if (started) {
+            Log.i(TAG, "🔄 ✅ Physical segment restarted at counter=$counter")
+            CameraDebugLog.append("🔄 ✅ Physical segment restarted counter=$counter")
+        } else {
+            Log.e(TAG, "🔄 ❌ Physical segment restart failed at counter=$counter")
+            CameraDebugLog.append("❌ Physical segment restart failed counter=$counter")
+            CameraDebugLog.flush()
+        }
+        return started
     }
 
-    private fun setupNextOutputFile(recorder: MediaRecorder?, folder: VideoBatchesFolder, counter: Long, ext: String) {
-        if (recorder == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val sid = folder.sessionId ?: ""
-        val fileName = "${folder.mediaPrefix}${sid}-%03d.%s".format(counter, ext)
-
-        when (folder.type) {
-            BatchesFolder.BatchType.INTERNAL -> {
-                val file = folder.asInternalGetFile(counter, ext)
-                recorder.setNextOutputFile(file)
-            }
-            BatchesFolder.BatchType.CUSTOM -> {
-                val pfd = folder.asCustomGetParcelFileDescriptor(counter, ext)
-                recorder.setNextOutputFile(pfd.fileDescriptor)
-            }
-            BatchesFolder.BatchType.MEDIA -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val values = folder.asMediaGetScopedStorageContentValues(fileName)
-                    val uri = context.contentResolver.insert(folder.scopedMediaContentUri, values)
-                    if (uri != null) {
-                        synchronized(pendingUris) { pendingUris.add(uri) }
-                        val pfd = context.contentResolver.openFileDescriptor(uri, "w")!!
-                        recorder.setNextOutputFile(pfd.fileDescriptor)
-                    }
-                } else {
-                    val file = File(folder.legacyMediaFolder, fileName)
-                    recorder.setNextOutputFile(file)
-                }
-            }
+    private suspend fun startAndAwait(counter: Long): Boolean = suspendCancellableCoroutine { continuation ->
+        try {
+            start(
+                counter = counter,
+                onStarted = {
+                    if (continuation.isActive) continuation.resume(true)
+                },
+                onError = {
+                    if (continuation.isActive) continuation.resume(false)
+                },
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to restart physical segment", e)
+            if (continuation.isActive) continuation.resume(false)
         }
     }
 
@@ -434,46 +546,102 @@ class Camera2PhysicalDualRecorder(
 
         isRecording = false
 
-        // Stop recorders FIRST before stopping camera stream to ensure proper MP4 moov finalization
+        // Error/fallback path is synchronous. Normal stop uses the suspend
+        // variant below so CameraCaptureSession.onReady can be awaited.
+        stopCurrentCaptureAndRecordersBlocking(stopBackground = true)
+        clearOutputState()
+        Log.i(TAG, "⏹️ Camera2PhysicalDualRecorder stopped completely (audio mux skipped)")
+        CameraDebugLog.append("⏹️ Camera2PhysicalDualRecorder stopped without audio mux")
+        CameraDebugLog.flush()
+    }
+
+    /**
+     * Stops both physical streams, then copies primary AAC audio into each
+     * secondary video. FFmpeg runs asynchronously and is awaited off the main
+     * thread so the service can finish its stop lifecycle deterministically.
+     */
+    suspend fun stopAndMuxAudio() {
+        Log.i(TAG, "⏹️ Stopping physical dual recorder with shared audio")
+        CameraDebugLog.append("⏹️ Stop physical dual recorder + shared audio")
+        isRecording = false
+
+        stopCurrentCaptureAndRecorders(stopBackground = true)
+        muxPrimaryAudioIntoSecondary()
+        clearOutputState()
+
+        Log.i(TAG, "⏹️ Camera2PhysicalDualRecorder stopped completely (audio mux finished)")
+        CameraDebugLog.append("⏹️ Camera2PhysicalDualRecorder stopped + audio mux finished")
+        CameraDebugLog.flush()
+    }
+
+    private suspend fun stopCurrentCaptureAndRecorders(stopBackground: Boolean) {
+        val ready = requestCaptureStop()
+        if (ready != null) {
+            withTimeoutOrNull(1500L) {
+                ready.await()
+            } ?: Log.w(TAG, "📸 Timed out waiting for capture session ready")
+        }
+        finishCaptureStop()
+        finalizeRecorders(stopBackground)
+    }
+
+    private fun stopCurrentCaptureAndRecordersBlocking(stopBackground: Boolean) {
+        requestCaptureStop()
+        finishCaptureStop()
+        finalizeRecorders(stopBackground)
+    }
+
+    private fun requestCaptureStop(): CompletableDeferred<Unit>? {
+        val session = captureSession ?: return null
+        val ready = CompletableDeferred<Unit>()
+        captureSessionReady = ready
+        try {
+            // Stop camera requests before stopping MediaRecorder. Otherwise
+            // Vivo may return MediaRecorder.stop() error -1004 and omit moov.
+            session.stopRepeating()
+            session.abortCaptures()
+            Log.i(TAG, "📸 Capture requests stopped; waiting for session ready")
+        } catch (e: Exception) {
+            Log.w(TAG, "📸 Failed to stop/abort capture requests", e)
+            ready.complete(Unit)
+        }
+        return ready
+    }
+
+    private fun finishCaptureStop() {
+        try {
+            captureSession?.close()
+            captureSession = null
+        } catch (e: Exception) {
+            Log.w(TAG, "Error closing capture session", e)
+        } finally {
+            captureSessionReady = null
+            primarySurface = null
+            secondarySurface = null
+        }
+    }
+
+    private fun finalizeRecorders(stopBackground: Boolean) {
         try {
             primaryRecorder?.setOnErrorListener(null)
             primaryRecorder?.setOnInfoListener(null)
             primaryRecorder?.stop()
+            Log.i(TAG, "⏹️ Primary physical recorder finalized")
         } catch (e: Exception) {
-            Log.d(TAG, "Primary recorder stopped (note: ${e.message})")
+            Log.w(TAG, "Primary physical recorder stop failed", e)
         }
 
         try {
             secondaryRecorder?.setOnErrorListener(null)
             secondaryRecorder?.setOnInfoListener(null)
             secondaryRecorder?.stop()
+            Log.i(TAG, "⏹️ Secondary physical recorder finalized")
         } catch (e: Exception) {
-            Log.d(TAG, "Secondary recorder stopped (note: ${e.message})")
+            Log.w(TAG, "Secondary physical recorder stop failed", e)
         }
 
-        try {
-            captureSession?.stopRepeating()
-            captureSession?.close()
-            captureSession = null
-        } catch (e: Exception) {
-            Log.w(TAG, "Error stopping capture session", e)
-        }
-
-        try {
-            primaryRecorder?.reset()
-            primaryRecorder?.release()
-            primaryRecorder = null
-        } catch (e: Exception) {
-            Log.w(TAG, "Error releasing primary recorder", e)
-        }
-
-        try {
-            secondaryRecorder?.reset()
-            secondaryRecorder?.release()
-            secondaryRecorder = null
-        } catch (e: Exception) {
-            Log.w(TAG, "Error releasing secondary recorder", e)
-        }
+        releaseRecorder(primaryRecorder, "primary")
+        releaseRecorder(secondaryRecorder, "secondary")
 
         try {
             cameraDevice?.close()
@@ -482,16 +650,165 @@ class Camera2PhysicalDualRecorder(
             Log.w(TAG, "Error closing camera device", e)
         }
 
-        // Commit all written chunks so they immediately appear in storage
         commitPendingUris()
+        closeOutputDescriptors()
+        if (stopBackground) stopBackgroundThread()
+    }
 
-        stopBackgroundThread()
-        Log.i(TAG, "⏹️ Camera2PhysicalDualRecorder stopped completely")
-        CameraDebugLog.append("⏹️ Camera2PhysicalDualRecorder stopped")
+    private fun releaseRecorder(recorder: MediaRecorder?, label: String) {
+        if (recorder == null) return
+        runCatching {
+            recorder.reset()
+            recorder.release()
+            Log.i(TAG, "⏹️ Released $label physical recorder")
+        }.onFailure { Log.w(TAG, "Error releasing $label physical recorder", it) }
+        if (label == "primary") primaryRecorder = null else secondaryRecorder = null
+    }
+
+    private fun closeOutputDescriptors() {
+        synchronized(outputDescriptors) {
+            outputDescriptors.forEach { descriptor ->
+                runCatching { descriptor.close() }
+                    .onFailure { Log.w(TAG, "Error closing output descriptor", it) }
+            }
+            outputDescriptors.clear()
+        }
+    }
+
+    private fun clearOutputState() {
+        synchronized(pendingUris) { pendingUris.clear() }
+        segmentTargets.clear()
+        currentCounter = null
+    }
+
+    private suspend fun muxPrimaryAudioIntoSecondary() = withContext(Dispatchers.IO) {
+        if (!enableAudio) {
+            Log.i(TAG, "🔊 Shared audio disabled; skip physical secondary mux")
+            return@withContext
+        }
+
+        val targets = segmentTargets.toSortedMap()
+        Log.i(TAG, "🔊 Muxing primary audio into ${targets.size} physical video segment(s)")
+        CameraDebugLog.append("🔊 Mux shared audio segments=${targets.size}")
+
+        for ((counter, segment) in targets) {
+            val primaryInput = getFfmpegInput(segment.primary)
+            val secondaryInput = getFfmpegInput(segment.secondary)
+            if (primaryInput == null || secondaryInput == null) {
+                Log.w(TAG, "🔊 Skip audio mux counter=$counter: input unavailable")
+                CameraDebugLog.append("⚠️ Audio mux skip counter=$counter input unavailable")
+                primaryInput?.close()
+                secondaryInput?.close()
+                continue
+            }
+
+            val temporaryOutput = File.createTempFile("dual-audio-$counter-", ".mp4", context.cacheDir)
+            try {
+                val command = "-protocol_whitelist file,fd,content,saf -y " +
+                    "${ffmpegInputArguments(secondaryInput)} " +
+                    "${ffmpegInputArguments(primaryInput)} " +
+                    "-map 0:v:0 -map 1:a:0 -c:v copy -c:a copy -shortest " +
+                    shellQuote(temporaryOutput.absolutePath)
+                Log.i(
+                    TAG,
+                    "🔊 Mux start counter=$counter " +
+                        "primary=${segment.primary.label}(fd=${primaryInput.fd ?: "path"}) " +
+                        "secondary=${segment.secondary.label}(fd=${secondaryInput.fd ?: "path"}) " +
+                        "command=$command",
+                )
+                CameraDebugLog.append(
+                    "🔊 Mux start counter=$counter " +
+                        "primaryFd=${primaryInput.fd ?: "path"} " +
+                        "secondaryFd=${secondaryInput.fd ?: "path"}",
+                )
+
+                val succeeded = runFfmpeg(command)
+                if (succeeded && temporaryOutput.exists() && temporaryOutput.length() > 0L) {
+                    val copied = copyFileToTarget(temporaryOutput, segment.secondary)
+                    if (copied) {
+                        Log.i(TAG, "🔊 ✅ Mux success counter=$counter, secondary audio replaced")
+                        CameraDebugLog.append("🔊 ✅ Mux success counter=$counter")
+                    } else {
+                        Log.e(TAG, "🔊 ❌ Mux output copy failed counter=$counter; original secondary kept")
+                        CameraDebugLog.append("❌ Mux copy failed counter=$counter; original kept")
+                    }
+                } else {
+                    Log.e(TAG, "🔊 ❌ FFmpeg mux failed counter=$counter; original secondary kept")
+                    CameraDebugLog.append("❌ FFmpeg mux failed counter=$counter; original kept")
+                }
+            } finally {
+                primaryInput.close()
+                secondaryInput.close()
+                runCatching { temporaryOutput.delete() }
+            }
+        }
         CameraDebugLog.flush()
+    }
+
+    private fun getFfmpegInput(target: OutputTarget): FfmpegInput? {
+        return runCatching {
+            target.file?.absolutePath?.let { FfmpegInput(it) }
+                ?: target.uri?.let { uri ->
+                    val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
+                        ?: return@let null
+                    Log.i(TAG, "🔊 Opened fresh mux input fd=${descriptor.fd} target=${target.label}")
+                    FfmpegInput("fd:", descriptor.fd, descriptor)
+                }
+        }.onFailure {
+            Log.w(TAG, "🔊 Cannot create FFmpeg input for ${target.label}", it)
+        }.getOrNull()
+    }
+
+    private fun ffmpegInputArguments(input: FfmpegInput): String {
+        return if (input.fd != null) {
+            // FFmpegKit n6 requires the descriptor number as -fd N; passing
+            // fd:N directly to -i is rejected on some vendor builds.
+            "-fd ${input.fd} -i ${shellQuote(input.path)}"
+        } else {
+            "-i ${shellQuote(input.path)}"
+        }
+    }
+
+    private suspend fun runFfmpeg(command: String): Boolean = suspendCancellableCoroutine { continuation ->
+        try {
+            FFmpegKit.executeAsync(command) { session ->
+                val success = session != null && ReturnCode.isSuccess(session.returnCode)
+                Log.i(TAG, "🔊 FFmpeg finished success=$success rc=${session?.returnCode}")
+                if (!success) {
+                    Log.e(
+                        TAG,
+                        "🔊 FFmpeg mux failure logs=" +
+                            session?.allLogsAsString?.takeLast(MAX_FFMPEG_FAILURE_LOG_CHARS),
+                    )
+                }
+                if (continuation.isActive) continuation.resume(success)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "🔊 FFmpeg invocation failed", e)
+            if (continuation.isActive) continuation.resume(false)
+        }
+    }
+
+    private fun copyFileToTarget(source: File, target: OutputTarget): Boolean {
+        return runCatching {
+            val output = target.file?.outputStream()
+                ?: target.uri?.let { context.contentResolver.openOutputStream(it, "wt") }
+                ?: error("Target has no writable stream")
+            source.inputStream().use { input ->
+                output.use { destination -> input.copyTo(destination) }
+            }
+            true
+        }.onFailure {
+            Log.e(TAG, "🔊 Cannot copy muxed output to ${target.label}", it)
+        }.getOrDefault(false)
+    }
+
+    private fun shellQuote(value: String): String {
+        return "'${value.replace("'", "'\\''")}'"
     }
 
     companion object {
         private const val TAG = "Camera2PhysicalDual"
+        private const val MAX_FFMPEG_FAILURE_LOG_CHARS = 4000
     }
 }

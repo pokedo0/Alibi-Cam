@@ -20,6 +20,7 @@ import app.leo.alibi_cam.ui.VIDEO_RECORDING_BATCHES_SUBFOLDER_NAME
 import com.arthenica.ffmpegkit.FFmpegKitConfig
 import java.io.File
 import java.time.LocalDateTime
+import java.util.UUID
 
 class VideoBatchesFolder(
     override val context: Context,
@@ -42,6 +43,175 @@ class VideoBatchesFolder(
     )
 
     private var customParcelFileDescriptor: ParcelFileDescriptor? = null
+
+    override fun prepareInputPathsForFFmpeg(extension: String): FFmpegInputPaths {
+        if (sessionId == null) {
+            return super.prepareInputPathsForFFmpeg(extension)
+        }
+
+        val uris = when (type) {
+            BatchType.CUSTOM -> listSessionChunkNames().mapNotNull { name ->
+                getCustomDefinedFolder().findFile(name)?.uri
+            }
+            BatchType.MEDIA -> {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    return super.prepareInputPathsForFFmpeg(extension)
+                }
+
+                val names = listSessionChunkNames().toSet()
+                val uriByName = mutableMapOf<String, Uri>()
+                val prefix = "${mediaPrefix}${sessionId}-"
+                context.contentResolver.query(
+                    scopedMediaContentUri,
+                    arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME),
+                    "${MediaStore.Video.Media.DISPLAY_NAME} LIKE ?",
+                    arrayOf("$prefix%"),
+                    null,
+                )?.use { cursor ->
+                    val idIndex = cursor.getColumnIndex(MediaStore.Video.Media._ID)
+                    val nameIndex = cursor.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
+                    while (cursor.moveToNext()) {
+                        val name = cursor.getString(nameIndex) ?: continue
+                        if (name in names) {
+                            uriByName[name] = ContentUris.withAppendedId(
+                                scopedMediaContentUri,
+                                cursor.getLong(idIndex),
+                            )
+                        }
+                    }
+                }
+                listSessionChunkNames().mapNotNull { uriByName[it] }
+            }
+            BatchType.INTERNAL -> return super.prepareInputPathsForFFmpeg(extension)
+        }
+
+        val descriptors = mutableListOf<ParcelFileDescriptor>()
+        try {
+            uris.forEach { uri ->
+                descriptors += context.contentResolver.openFileDescriptor(uri, "r")
+                    ?: throw MediaConverter.FFmpegException("Unable to open FFmpeg input $uri")
+            }
+        } catch (error: Exception) {
+            descriptors.forEach { runCatching { it.close() } }
+            throw error
+        }
+        val validDescriptors = descriptors.filter { descriptor ->
+            // Some document providers report -1 for unknown size; only zero is
+            // definitely an empty input.
+            descriptor.statSize != 0L
+        }
+        descriptors.filterNot { it in validDescriptors }.forEach { it.close() }
+        if (validDescriptors.isEmpty()) {
+            throw MediaConverter.FFmpegException("No valid media batches available")
+        }
+        Log.i(TAG, "Prepared ${validDescriptors.size} FFmpeg fd inputs for session=$sessionId type=$type")
+        return FFmpegInputPaths(
+            paths = validDescriptors.map { "fd:${it.fd}" },
+            closeables = validDescriptors,
+        )
+    }
+
+    override fun prepareOutputTargetForFFmpeg(
+        date: LocalDateTime,
+        extension: String,
+        fileName: String,
+    ): FFmpegOutputTarget {
+        return when (type) {
+            BatchType.INTERNAL -> super.prepareOutputTargetForFFmpeg(date, extension, fileName)
+            BatchType.CUSTOM -> prepareCustomOutputTarget(extension, fileName)
+            BatchType.MEDIA -> {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    super.prepareOutputTargetForFFmpeg(date, extension, fileName)
+                } else {
+                    prepareMediaOutputTarget(extension, fileName)
+                }
+            }
+        }
+    }
+
+    private fun prepareCustomOutputTarget(
+        extension: String,
+        fileName: String,
+    ): FFmpegOutputTarget {
+        val parent = customFolder ?: throw MediaConverter.FFmpegException("Custom folder unavailable")
+        val tempName = ".tmp-${UUID.randomUUID()}-$fileName"
+        val tempFile = parent.createFile("video/$extension", tempName)
+            ?: throw MediaConverter.FFmpegException("Unable to create custom FFmpeg output")
+        val descriptor = try {
+            context.contentResolver.openFileDescriptor(tempFile.uri, "rwt")
+                ?: throw MediaConverter.FFmpegException("Unable to open custom FFmpeg output")
+        } catch (error: Exception) {
+            tempFile.delete()
+            throw error
+        }
+
+        return FFmpegOutputTarget(
+            path = "fd:${descriptor.fd}",
+            format = ffmpegFormatForExtension(extension),
+            closeables = listOf(descriptor),
+            onSuccess = {
+                parent.findFile(fileName)?.delete()
+                if (!tempFile.renameTo(fileName)) {
+                    throw MediaConverter.FFmpegException("Unable to publish custom FFmpeg output")
+                }
+                (parent.findFile(fileName) ?: tempFile).uri.toString()
+            },
+            onFailure = { tempFile.delete() },
+        )
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun prepareMediaOutputTarget(
+        extension: String,
+        fileName: String,
+    ): FFmpegOutputTarget {
+        val relativePath = BASE_SCOPED_STORAGE_RELATIVE_PATH + "/" + MEDIA_SUBFOLDER_NAME
+        val tempName = "tmp-${UUID.randomUUID()}-$fileName"
+        val uri = context.contentResolver.insert(
+            scopedMediaContentUri,
+            ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, tempName)
+                put(MediaStore.Video.Media.MIME_TYPE, "video/$extension")
+                put(MediaStore.Video.Media.RELATIVE_PATH, relativePath)
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            },
+        ) ?: throw MediaConverter.FFmpegException("Unable to create MediaStore FFmpeg output")
+        val descriptor = try {
+            context.contentResolver.openFileDescriptor(uri, "rwt")
+                ?: throw MediaConverter.FFmpegException("Unable to open MediaStore FFmpeg output")
+        } catch (error: Exception) {
+            context.contentResolver.delete(uri, null, null)
+            throw error
+        }
+
+        return FFmpegOutputTarget(
+            path = "fd:${descriptor.fd}",
+            format = ffmpegFormatForExtension(extension),
+            closeables = listOf(descriptor),
+            onSuccess = {
+                context.contentResolver.delete(
+                    scopedMediaContentUri,
+                    "${MediaStore.Video.Media.RELATIVE_PATH} = ? AND " +
+                        "${MediaStore.Video.Media.DISPLAY_NAME} = ?",
+                    arrayOf(relativePath, fileName),
+                )
+                val updated = context.contentResolver.update(
+                    uri,
+                    ContentValues().apply {
+                        put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+                        put(MediaStore.Video.Media.IS_PENDING, 0)
+                    },
+                    null,
+                    null,
+                )
+                if (updated <= 0) {
+                    throw MediaConverter.FFmpegException("Unable to publish MediaStore FFmpeg output")
+                }
+                uri.toString()
+            },
+            onFailure = { context.contentResolver.delete(uri, null, null) },
+        )
+    }
 
     /**
      * Session ID for flat storage mode. When set, chunks are stored directly in
@@ -364,6 +534,21 @@ class VideoBatchesFolder(
                 }
             }
         }
+    }
+
+    /**
+     * Deletes an explicit set of flat-storage chunks.
+     * The caller supplies a snapshot taken before concatenation, so the final
+     * output file is never selected for deletion.
+     */
+    fun deleteFlatChunks(names: Iterable<String>): Int {
+        var deleted = 0
+        names.distinct().forEach { name ->
+            if (deleteFlatChunk(name)) {
+                deleted++
+            }
+        }
+        return deleted
     }
 
     /**

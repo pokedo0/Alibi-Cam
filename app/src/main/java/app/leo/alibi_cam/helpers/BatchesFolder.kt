@@ -29,7 +29,6 @@ import kotlinx.coroutines.CompletableDeferred
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
-import kotlin.reflect.KFunction4
 
 
 abstract class BatchesFolder(
@@ -38,7 +37,7 @@ abstract class BatchesFolder(
     open val customFolder: DocumentFile? = null,
     open val subfolderName: String = ".recordings",
 ) {
-    abstract val concatenationFunction: KFunction4<Iterable<String>, String, String, (Int) -> Unit, CompletableDeferred<Unit>>
+    abstract val concatenationFunction: ConcatenationFunction
     abstract val ffmpegParameters: Array<String>
     abstract val scopedMediaContentUri: Uri
     abstract val legacyMediaFolder: File
@@ -260,6 +259,73 @@ abstract class BatchesFolder(
 
     abstract fun cleanup()
 
+    /**
+     * Opens a fresh set of FFmpeg inputs for each retry.
+     * SAF-backed implementations keep their descriptors alive until FFmpeg
+     * has completed, instead of passing stale `saf:` handles between retries.
+     */
+    open fun prepareInputPathsForFFmpeg(extension: String): FFmpegInputPaths {
+        return when (type) {
+            BatchType.INTERNAL -> FFmpegInputPaths(getBatchesForFFmpeg())
+            BatchType.CUSTOM -> {
+                val uris = getCustomDefinedFolder()
+                    .listFiles()
+                    .filter { it.isFile && it.name?.substringBeforeLast(".")?.toIntOrNull() != null }
+                    .sortedBy { it.name!!.substringBeforeLast(".").toInt() }
+                    .map { it.uri }
+                openSafInputPaths(uris)
+            }
+            BatchType.MEDIA -> {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    FFmpegInputPaths(getBatchesForFFmpeg())
+                } else {
+                    val uris = mutableListOf<Pair<Int, Uri>>()
+                    queryMediaContent { _, counter, uri, _ ->
+                        uris.add(counter to uri)
+                    }
+                    openSafInputPaths(uris.sortedBy { it.first }.map { it.second })
+                }
+            }
+        }
+    }
+
+    private fun openSafInputPaths(uris: List<Uri>): FFmpegInputPaths {
+        val descriptors = mutableListOf<ParcelFileDescriptor>()
+        try {
+            uris.forEach { uri ->
+                descriptors += context.contentResolver.openFileDescriptor(uri, "r")
+                    ?: throw MediaConverter.FFmpegException("Unable to open FFmpeg input $uri")
+            }
+        } catch (error: Exception) {
+            descriptors.forEach { runCatching { it.close() } }
+            throw error
+        }
+
+        if (descriptors.isEmpty()) {
+            throw MediaConverter.FFmpegException("No valid media batches available")
+        }
+        Log.i("Concatenation", "Prepared ${descriptors.size} FFmpeg fd inputs for type=$type")
+        return FFmpegInputPaths(
+            paths = descriptors.map { "fd:${it.fd}" },
+            closeables = descriptors,
+        )
+    }
+
+    open fun prepareOutputTargetForFFmpeg(
+        date: LocalDateTime,
+        extension: String,
+        fileName: String,
+    ): FFmpegOutputTarget {
+        return FFmpegOutputTarget(
+            path = getOutputFileForFFmpeg(
+                date = date,
+                extension = extension,
+                fileName = fileName,
+            ),
+            format = ffmpegFormatForExtension(extension),
+        )
+    }
+
     suspend fun concatenate(
         recording: RecordingInformation,
         filenameFormat: AppSettings.FilenameFormat,
@@ -285,28 +351,48 @@ abstract class BatchesFolder(
             onNextParameterTry(parameter)
             onProgress(null)
 
+            var inputPaths: FFmpegInputPaths? = null
+            var outputTarget: FFmpegOutputTarget? = null
             try {
-                val fullTime = recording.getFullDuration().toFloat();
-                val filePaths = getBatchesForFFmpeg()
+                val fullTime = recording.getFullDuration().toFloat().coerceAtLeast(1f)
+                inputPaths = prepareInputPathsForFFmpeg(recording.fileExtension)
+                if (inputPaths.paths.isEmpty()) {
+                    throw MediaConverter.FFmpegException("No valid media batches available")
+                }
 
-                val outputFile = getOutputFileForFFmpeg(
+                outputTarget = prepareOutputTargetForFFmpeg(
                     date = date,
                     extension = recording.fileExtension,
                     fileName = fileName,
                 )
 
                 concatenationFunction(
-                    filePaths,
-                    outputFile,
-                    parameter
-                ) { time ->
-                    // The progressbar for the conversion is calculated based on the
-                    // current time of the conversion and the total time of the batches.
-                    onProgress(time / fullTime)
-                }.await()
-                return outputFile
+                    inputPaths.paths,
+                    outputTarget,
+                    parameter,
+                    { time ->
+                        // The progressbar for the conversion is calculated based on the
+                        // current time of the conversion and the total time of the batches.
+                        onProgress(time / fullTime)
+                    },
+                    inputPaths,
+                ).await()
+
+                // Close descriptors before publishing/renaming the output URI.
+                inputPaths.close()
+                outputTarget.close()
+                val publishedOutput = outputTarget.onSuccess()
+                Log.i("Concatenation", "FFmpeg succeeded output=$publishedOutput")
+                return publishedOutput
             } catch (e: MediaConverter.FFmpegException) {
+                Log.w("Concatenation", "FFmpeg attempt failed: ${e.message}")
+                inputPaths?.close()
+                outputTarget?.close()
+                runCatching { outputTarget?.onFailure?.invoke() }
                 continue
+            } finally {
+                inputPaths?.close()
+                outputTarget?.close()
             }
         }
 

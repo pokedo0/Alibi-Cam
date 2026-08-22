@@ -58,6 +58,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.properties.Delegates
@@ -255,12 +256,18 @@ class VideoRecorderService :
             // just-finalized chunk must be on disk/MediaStore when we count.
             counter += 1
 
-            Log.i(TAG, "🔄 startNewCycle: counter=$counter, isDualMode=$isDualMode")
-            CameraDebugLog.append("🔄 startNewCycle: counter=$counter, dual=$isDualMode")
+            Log.i(TAG, "🔄 startNewCycle: counter=$counter, interval=${settings.intervalDuration}ms, isDualMode=$isDualMode")
+            CameraDebugLog.append("🔄 startNewCycle: counter=$counter, interval=${settings.intervalDuration}ms, dual=$isDualMode")
 
             fun action() {
                 if (physicalDualRecorder?.isRecording == true) {
-                    physicalDualRecorder?.rotateNextChunk(counter)
+                    // The interval timer runs on its own scheduler thread. Wait
+                    // for both physical recorders to finalize and for the new
+                    // Camera2 session to be ready before pruning old chunks or
+                    // allowing the next interval to overlap this rotation.
+                    runBlocking(Dispatchers.IO) {
+                        physicalDualRecorder?.rotateNextChunk(counter)
+                    }
                 } else {
                     stopActiveRecording()
                     startCycleForStream(primary, batchesFolder)
@@ -437,8 +444,10 @@ class VideoRecorderService :
     /**
      * Open the camera(s) and optionally engage ultra-wide via zoom ratio.
      *
-     * In dual-camera mode (when dualCameraEnabled is true and device supports ConcurrentCamera):
-     * - Binds two cameras concurrently via ConcurrentCamera API
+      * In dual-camera mode, the capability plan chooses CameraX ConcurrentCamera
+      * first and Camera2 physical streams when the OEM exposes rear sensors only
+      * through one logical multi-camera:
+      * - Binds two cameras through the selected backend
      * - Each camera records to its own stream and folder (separated by CameraPosition)
      * - If concurrent binding fails, gracefully falls back to single camera.
      */
@@ -457,7 +466,7 @@ class VideoRecorderService :
             DualCameraSupport.DualPlan(DualCameraSupport.Strategy.NONE)
         }
 
-        Log.i(TAG, "📸 openCamera: dualRequested=$dualRequested, planStrategy=${plan.strategy}")
+        Log.i(TAG, "📸 openCamera: dualRequested=$dualRequested, strategy=${plan.strategy}")
         CameraDebugLog.append("📸 openCamera: dualReq=$dualRequested, plan=${plan.strategy}")
 
         when (plan.strategy) {
@@ -466,9 +475,9 @@ class VideoRecorderService :
                 openDualCamera(plan.cameraxPair!!)
             }
             DualCameraSupport.Strategy.PHYSICAL_CAMERA2 -> {
+                isDualMode = true
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    isDualMode = true
-                    openPhysicalDualCamera(plan.primaryPhysicalId!!, plan.secondaryPhysicalId!!)
+                    openPhysicalDualCamera(plan.physicalPair!!)
                 } else {
                     isDualMode = false
                     openSingleCamera()
@@ -481,36 +490,36 @@ class VideoRecorderService :
         }
     }
 
-    /**
-     * Bind two physical sub-cameras of logical camera 0 using Camera2 API.
-     */
+    /** Bind two physical rear sensors through their common logical camera. */
     @RequiresApi(Build.VERSION_CODES.P)
-    private fun openPhysicalDualCamera(primaryPhysicalId: String, secondaryPhysicalId: String) {
+    private fun openPhysicalDualCamera(pair: DualCameraSupport.PhysicalCameraPair) {
         val primaryPosition = CameraPosition.fromLensString(settings.videoRecorderSettings.cameraLens)
         val secondaryPosition = CameraPosition.fromLensString(settings.videoRecorderSettings.secondaryCameraLens)
 
-        Log.i(TAG, "📸 openPhysicalDualCamera: primary=$primaryPhysicalId ($primaryPosition), secondary=$secondaryPhysicalId ($secondaryPosition)")
-        CameraDebugLog.append("📸 openPhysicalDualCamera: prim=$primaryPhysicalId, sec=$secondaryPhysicalId")
+        Log.i(
+            TAG,
+            "📸 openPhysicalDualCamera: logical=${pair.logicalCameraId}, " +
+                "primary=${pair.primaryPhysicalId}, secondary=${pair.secondaryPhysicalId}",
+        )
+        CameraDebugLog.append(
+            "📸 Physical dual: logical=${pair.logicalCameraId}, " +
+                "primary=${pair.primaryPhysicalId}($primaryPosition), " +
+                "secondary=${pair.secondaryPhysicalId}($secondaryPosition)",
+        )
 
-        // Ensure secondary batches folder exists
-        if (secondaryBatchesFolder == null) {
-            secondaryBatchesFolder = VideoBatchesFolder.viaInternalFolder(
-                this@VideoRecorderService,
-                secondaryPosition,
-            ).also {
-                it.sessionId = batchesFolder.sessionId
-                it.initFolders()
-            }
-        } else {
-            secondaryBatchesFolder!!.sessionId = batchesFolder.sessionId
-            secondaryBatchesFolder!!.initFolders()
+        // Keep both streams in the user's selected storage type. The position
+        // suffix isolates secondary chunks and merged output from the primary.
+        secondaryBatchesFolder = createSecondaryBatchesFolder(secondaryPosition).also {
+            it.sessionId = batchesFolder.sessionId
+            it.initFolders()
         }
 
         physicalDualRecorder = Camera2PhysicalDualRecorder(
             context = this,
             settings = settings,
-            primaryPhysicalId = primaryPhysicalId,
-            secondaryPhysicalId = secondaryPhysicalId,
+            logicalCameraId = pair.logicalCameraId,
+            primaryPhysicalId = pair.primaryPhysicalId,
+            secondaryPhysicalId = pair.secondaryPhysicalId,
             primaryFolder = batchesFolder,
             secondaryFolder = secondaryBatchesFolder!!,
             enableAudio = enableAudio,
@@ -521,12 +530,32 @@ class VideoRecorderService :
             onStarted = {
                 _cameraAvailableListener.complete(Unit)
                 Log.i(TAG, "📸 ✅ Physical dual camera recorder ready")
+                CameraDebugLog.append("📸 ✅ Physical dual recorder READY")
             },
-            onError = { err: String ->
-                Log.e(TAG, "📸 ❌ Physical dual camera failed: $err")
-                _cameraAvailableListener.complete(Unit)
-            }
+            onError = { error ->
+                Log.e(TAG, "📸 ❌ Physical dual camera failed: $error")
+                CameraDebugLog.append("📸 ❌ Physical dual failed: $error")
+                runOnMain {
+                    physicalDualRecorder?.stop()
+                    physicalDualRecorder = null
+                    isDualMode = false
+                    openSingleCamera()
+                }
+            },
         )
+    }
+
+    private fun createSecondaryBatchesFolder(position: CameraPosition): VideoBatchesFolder {
+        return when (batchesFolder.type) {
+            BatchesFolder.BatchType.INTERNAL -> VideoBatchesFolder.viaInternalFolder(this, position)
+            BatchesFolder.BatchType.CUSTOM -> VideoBatchesFolder.viaCustomFolder(
+                this,
+                batchesFolder.customFolder
+                    ?: error("Custom folder unavailable for dual recording"),
+                position,
+            )
+            BatchesFolder.BatchType.MEDIA -> VideoBatchesFolder.viaMediaFolder(this, position)
+        }
     }
 
     /**
@@ -575,18 +604,10 @@ class VideoRecorderService :
                     this.camera = concurrent.cameras.getOrNull(1)
                 }
 
-                // Ensure secondary batches folder exists
-                if (secondaryBatchesFolder == null) {
-                    secondaryBatchesFolder = VideoBatchesFolder.viaInternalFolder(
-                        this@VideoRecorderService,
-                        secondary!!.position,
-                    ).also {
-                        it.sessionId = batchesFolder.sessionId
-                        it.initFolders()
-                    }
-                } else {
-                    secondaryBatchesFolder!!.sessionId = batchesFolder.sessionId
-                    secondaryBatchesFolder!!.initFolders()
+                // Keep secondary output in same storage type as primary.
+                secondaryBatchesFolder = createSecondaryBatchesFolder(secondary!!.position).also {
+                    it.sessionId = batchesFolder.sessionId
+                    it.initFolders()
                 }
 
                 if (cameraLensMode == "ultrawide") {
@@ -1010,15 +1031,19 @@ class VideoRecorderService :
     // ────────────────────────────────────────────────────────────
     // Used to close it finally, shouldn't be called when pausing / resuming.
     // This should only be called after recording has finished.
-    private fun closeCamera() {
-        if (physicalDualRecorder != null) {
+    private suspend fun closeCamera() {
+        physicalDualRecorder?.let { recorder ->
             try {
-                physicalDualRecorder?.stop()
+                // Physical dual streams need both MP4 files finalized before
+                // the primary AAC track can be copied into the secondary file.
+                recorder.stopAndMuxAudio()
             } catch (e: Exception) {
-                Log.w(TAG, "Error stopping physical dual recorder", e)
+                Log.w(TAG, "Error stopping/muxing physical dual recorder", e)
+                CameraDebugLog.append("⚠️ Physical dual stop/mux failed: ${e.message}")
+                CameraDebugLog.flush()
             }
-            physicalDualRecorder = null
         }
+        physicalDualRecorder = null
 
         runOnMain {
             runCatching {

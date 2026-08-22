@@ -10,17 +10,18 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import app.leo.alibi_cam.helpers.CameraDebugLog
 
 /**
- * Helpers for simultaneous dual-camera recording.
+ * Resolves dual-camera capabilities in hardware terms instead of assuming
+ * that every OEM uses the same camera IDs.
  *
- * Supports two strategies:
- * 1. [Strategy.CONCURRENT_CAMERAX]: Standard Android 11+ (API 30) multi-device concurrent
- *    streaming (e.g. Front + Back).
- * 2. [Strategy.PHYSICAL_CAMERA2]: Android 9+ (API 28) Logical Multi-Camera physical stream
- *    separation (e.g. Back Main ID 2 + Back Telephoto ID 3, or Back UltraWide ID 4 + Back Telephoto ID 3).
+ * CameraX ConcurrentCamera is preferred. Some devices expose a logical
+ * multi-camera (for example, rear main/tele/ultra-wide) only through Camera2
+ * physical output streams, so that path is returned as a fallback plan.
  */
 object DualCameraSupport {
 
     private const val TAG = "DualCameraSupport"
+    private const val ULTRA_WIDE_MAX_MM = 3.5f
+    private const val TELEPHOTO_MIN_MM = 10.0f
 
     enum class Strategy {
         CONCURRENT_CAMERAX,
@@ -28,64 +29,53 @@ object DualCameraSupport {
         NONE,
     }
 
+    data class PhysicalCameraPair(
+        val logicalCameraId: String,
+        val primaryPhysicalId: String,
+        val secondaryPhysicalId: String,
+    )
+
+    data class SupportedPair(
+        val primary: androidx.camera.core.CameraInfo,
+        val secondary: androidx.camera.core.CameraInfo,
+        val primarySelector: CameraSelector,
+        val secondarySelector: CameraSelector,
+    )
+
     data class DualPlan(
         val strategy: Strategy,
         val cameraxPair: SupportedPair? = null,
-        val primaryPhysicalId: String? = null,
-        val secondaryPhysicalId: String? = null,
+        val physicalPair: PhysicalCameraPair? = null,
     )
 
-    /** True if the device can run dual cameras (via either CameraX or Camera2 physical streams). */
+    /** True when either CameraX or Camera2 can provide a dual pair. */
     suspend fun isSupported(context: Context): Boolean {
-        // 1. Check CameraX concurrent camera support (API 30+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                val provider = context.getCameraProvider()
-                val combos = provider.availableConcurrentCameraInfos
-                Log.i(TAG, "🔍 DualCameraSupport.isSupported: combos count = ${combos.size}")
-                CameraDebugLog.append("🔍 ConcurrentCamera combos count = ${combos.size}")
-                combos.forEachIndexed { idx, combo ->
-                    val descs = combo.map { camInfo ->
-                        val facing = when (camInfo.lensFacing) {
-                            CameraSelector.LENS_FACING_BACK -> "BACK"
-                            CameraSelector.LENS_FACING_FRONT -> "FRONT"
-                            else -> "OTHER(${camInfo.lensFacing})"
-                        }
-                        val id = runCatching {
-                            androidx.camera.camera2.interop.Camera2CameraInfo.from(camInfo).cameraId
-                        }.getOrDefault("?")
-                        "ID=$id($facing)"
-                    }.joinToString(", ")
-                    Log.i(TAG, "  Combo [$idx]: $descs")
-                    CameraDebugLog.append("  Combo [$idx]: $descs")
-                }
-                CameraDebugLog.flush()
-                if (combos.any { it.size >= 2 }) return true
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to check concurrent camera support", e)
-            }
+        return try {
+            val provider = context.getCameraProvider()
+            val physicalAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                findAnyPhysicalPair(context) != null
+            val cameraxAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                provider.availableConcurrentCameraInfos.any { it.size >= 2 }
+            Log.i(
+                TAG,
+                "🔍 Dual support: camerax=$cameraxAvailable, physical=$physicalAvailable",
+            )
+            CameraDebugLog.append(
+                "🔍 Dual support: camerax=$cameraxAvailable, physical=$physicalAvailable",
+            )
+            cameraxAvailable || physicalAvailable
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to resolve dual-camera support", e)
+            CameraDebugLog.append("⚠️ Dual support check failed: ${e.message}")
+            CameraDebugLog.flush()
+            false
         }
-
-        // 2. Check Camera2 Logical Multi-Camera support (API 28+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            try {
-                val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-                val characteristics = cameraManager.getCameraCharacteristics("0")
-                val physicalIds = characteristics.physicalCameraIds
-                Log.i(TAG, "🔍 Camera 0 physical sub-cameras: $physicalIds")
-                CameraDebugLog.append("🔍 Camera 0 physical sub-cameras: $physicalIds")
-                CameraDebugLog.flush()
-                if (physicalIds.size >= 2) return true
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to check physical camera support", e)
-            }
-        }
-
-        return false
     }
 
     /**
-     * Resolve the dual camera execution plan for the given lens combination.
+     * Prefer a CameraX concurrent pair, then try physical streams within one
+     * logical rear camera. A physical plan is only returned for two rear lens
+     * labels; front-camera combinations must use CameraX.
      */
     fun resolveDualPlan(
         context: Context,
@@ -95,84 +85,66 @@ object DualCameraSupport {
     ): DualPlan {
         if (secondaryLens == null) return DualPlan(Strategy.NONE)
 
-        Log.i(TAG, "🔍 Resolving dual camera plan for: $primaryLens + $secondaryLens")
-        CameraDebugLog.append("🔍 Resolving dual plan: $primaryLens + $secondaryLens")
-
-        // 1. Try CameraX ConcurrentCamera (for Front + Back)
-        val cameraxPair = findPairForLenses(provider, primaryLens, secondaryLens)
-        if (cameraxPair != null) {
-            Log.i(TAG, "🎯 Selected Strategy: CONCURRENT_CAMERAX")
-            CameraDebugLog.append("🎯 Plan: CONCURRENT_CAMERAX (Front/Back)")
-            return DualPlan(
-                strategy = Strategy.CONCURRENT_CAMERAX,
-                cameraxPair = cameraxPair,
-            )
-        }
-
-        // 2. Try Camera2 Physical Streams (for Back + Back combinations, e.g. Main + Telephoto)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            try {
-                val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-                val characteristics = cameraManager.getCameraCharacteristics("0")
-                val physicalIds = characteristics.physicalCameraIds
-
-                val primaryId = mapLensToPhysicalId(primaryLens, physicalIds, isPrimary = true)
-                val secondaryId = mapLensToPhysicalId(secondaryLens, physicalIds, isPrimary = false)
-
-                if (primaryId != null && secondaryId != null && primaryId != secondaryId) {
-                    Log.i(TAG, "🎯 Selected Strategy: PHYSICAL_CAMERA2 ($primaryId + $secondaryId)")
-                    CameraDebugLog.append("🎯 Plan: PHYSICAL_CAMERA2 ($primaryId + $secondaryId)")
-                    CameraDebugLog.flush()
-                    return DualPlan(
-                        strategy = Strategy.PHYSICAL_CAMERA2,
-                        primaryPhysicalId = primaryId,
-                        secondaryPhysicalId = secondaryId,
-                    )
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Error checking physical camera plan", e)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            findPairForLenses(context, provider, primaryLens, secondaryLens)?.let {
+                Log.i(TAG, "✅ Using CameraX concurrent pair for $primaryLens + $secondaryLens")
+                CameraDebugLog.append("✅ Plan=CAMERAX for $primaryLens + $secondaryLens")
+                return DualPlan(Strategy.CONCURRENT_CAMERAX, cameraxPair = it)
             }
         }
 
-        Log.w(TAG, "❌ No supported dual camera plan for $primaryLens + $secondaryLens")
-        CameraDebugLog.append("❌ No dual plan for $primaryLens + $secondaryLens")
-        CameraDebugLog.flush()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            isRearLens(primaryLens) && isRearLens(secondaryLens)
+        ) {
+            findPhysicalPair(context, primaryLens, secondaryLens)?.let {
+                Log.i(
+                    TAG,
+                    "✅ Using Camera2 physical pair: logical=${it.logicalCameraId}, " +
+                        "primary=${it.primaryPhysicalId}, secondary=${it.secondaryPhysicalId}",
+                )
+                CameraDebugLog.append(
+                    "✅ Plan=PHYSICAL_CAMERA2 logical=${it.logicalCameraId} " +
+                        "primary=${it.primaryPhysicalId} secondary=${it.secondaryPhysicalId}",
+                )
+                return DualPlan(Strategy.PHYSICAL_CAMERA2, physicalPair = it)
+            }
+        }
+
+        Log.w(TAG, "❌ No dual plan for $primaryLens + $secondaryLens")
+        CameraDebugLog.append("❌ Plan=NONE for $primaryLens + $secondaryLens")
         return DualPlan(Strategy.NONE)
     }
 
-    private fun mapLensToPhysicalId(
-        lens: String?,
-        availablePhysicalIds: Set<String>,
-        isPrimary: Boolean,
-    ): String? {
-        return when (lens) {
-            "telephoto" -> if ("3" in availablePhysicalIds) "3" else null
-            "ultrawide" -> if ("4" in availablePhysicalIds) "4" else null
-            "main", "auto", null -> if ("2" in availablePhysicalIds) "2" else "0"
-            else -> null
-        }
-    }
+    private fun isRearLens(lens: String?): Boolean =
+        lens == null || lens == "auto" || lens == "main" ||
+            lens == "ultrawide" || lens == "telephoto"
 
-    /**
-     * Find a concurrent camera pair that matches the requested lens combination.
-     */
-    fun findPairForLenses(
+    private fun findPairForLenses(
+        context: Context,
         provider: ProcessCameraProvider,
         primaryLens: String?,
         secondaryLens: String?,
     ): SupportedPair? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        if (secondaryLens == null) return null
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || secondaryLens == null) return null
 
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         for (combo in provider.availableConcurrentCameraInfos) {
             if (combo.size < 2) continue
 
-            // Exact match
-            val primary = combo.firstOrNull { matchCameraToLens(it, primaryLens) }
-            val remaining = combo.filter { it != primary }
-            val secondary = remaining.firstOrNull { matchCameraToLens(it, secondaryLens) }
-
+            val primary = combo.firstOrNull {
+                cameraMatchesLens(manager, cameraIdOf(it), primaryLens)
+            }
+            val secondary = combo.firstOrNull {
+                it != primary && cameraMatchesLens(manager, cameraIdOf(it), secondaryLens)
+            }
             if (primary != null && secondary != null) {
+                val primaryId = cameraIdOf(primary)
+                val secondaryId = cameraIdOf(secondary)
+                Log.i(TAG, "✅ CameraX pair IDs: $primaryId + $secondaryId")
+                CameraDebugLog.append(
+                    "✅ CameraX pair IDs: $primaryId + $secondaryId " +
+                        "($primaryLens + $secondaryLens)",
+                )
                 return SupportedPair(
                     primary = primary,
                     secondary = secondary,
@@ -180,44 +152,95 @@ object DualCameraSupport {
                     secondarySelector = secondary.cameraSelector,
                 )
             }
-
-            // Reverse match
-            val secondaryAlt = combo.firstOrNull { matchCameraToLens(it, secondaryLens) }
-            val remainingAlt = combo.filter { it != secondaryAlt }
-            val primaryAlt = remainingAlt.firstOrNull { matchCameraToLens(it, primaryLens) }
-
-            if (primaryAlt != null && secondaryAlt != null) {
-                return SupportedPair(
-                    primary = primaryAlt,
-                    secondary = secondaryAlt,
-                    primarySelector = primaryAlt.cameraSelector,
-                    secondarySelector = secondaryAlt.cameraSelector,
-                )
-            }
         }
-
         return null
     }
 
-    private fun matchCameraToLens(camInfo: androidx.camera.core.CameraInfo, lens: String?): Boolean {
-        val cameraId = runCatching {
-            androidx.camera.camera2.interop.Camera2CameraInfo.from(camInfo).cameraId
+    private fun cameraIdOf(cameraInfo: androidx.camera.core.CameraInfo): String =
+        runCatching {
+            androidx.camera.camera2.interop.Camera2CameraInfo.from(cameraInfo).cameraId
         }.getOrDefault("")
-        val facing = camInfo.lensFacing
 
-        return when (lens) {
-            "front" -> facing == CameraSelector.LENS_FACING_FRONT || cameraId == "1"
-            "telephoto" -> cameraId == "3"
-            "ultrawide" -> cameraId == "4" || (facing == CameraSelector.LENS_FACING_BACK && cameraId == "0")
-            "main", "auto", null -> cameraId == "0" || cameraId == "2" || (facing == CameraSelector.LENS_FACING_BACK && cameraId != "3" && cameraId != "4")
+    private fun cameraMatchesLens(
+        manager: CameraManager,
+        cameraId: String,
+        requestedLens: String?,
+    ): Boolean {
+        if (cameraId.isBlank()) return false
+        val facing = runCatching {
+            manager.getCameraCharacteristics(cameraId)
+                .get(CameraCharacteristics.LENS_FACING)
+        }.getOrNull()
+
+        if (requestedLens == "front") {
+            return facing == CameraSelector.LENS_FACING_FRONT
+        }
+        if (facing != CameraSelector.LENS_FACING_BACK) return false
+
+        return lensKind(readFocalLength(manager, cameraId)).matches(requestedLens)
+    }
+
+    private fun findPhysicalPair(
+        context: Context,
+        primaryLens: String?,
+        secondaryLens: String?,
+    ): PhysicalCameraPair? {
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        for (logicalId in manager.cameraIdList) {
+            val characteristics = runCatching {
+                manager.getCameraCharacteristics(logicalId)
+            }.getOrNull() ?: continue
+            if (characteristics.get(CameraCharacteristics.LENS_FACING) != CameraSelector.LENS_FACING_BACK) {
+                continue
+            }
+
+            val physicalIds = characteristics.physicalCameraIds
+            if (physicalIds.size < 2) continue
+
+            val primaryId = physicalIds.firstOrNull {
+                lensKind(readFocalLength(manager, it)).matches(primaryLens)
+            }
+            val secondaryId = physicalIds.firstOrNull {
+                it != primaryId && lensKind(readFocalLength(manager, it)).matches(secondaryLens)
+            }
+            if (primaryId != null && secondaryId != null) {
+                return PhysicalCameraPair(logicalId, primaryId, secondaryId)
+            }
+        }
+        return null
+    }
+
+    private fun findAnyPhysicalPair(context: Context): PhysicalCameraPair? {
+        return findPhysicalPair(context, "main", "telephoto")
+            ?: findPhysicalPair(context, "main", "ultrawide")
+            ?: findPhysicalPair(context, "telephoto", "ultrawide")
+    }
+
+    private fun readFocalLength(manager: CameraManager, cameraId: String): Float? =
+        runCatching {
+            manager.getCameraCharacteristics(cameraId)
+                .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                ?.minOrNull()
+        }.getOrNull()
+
+    private fun lensKind(focalLength: Float?): LensKind = when {
+        focalLength == null -> LensKind.MAIN
+        focalLength < ULTRA_WIDE_MAX_MM -> LensKind.ULTRA_WIDE
+        focalLength > TELEPHOTO_MIN_MM -> LensKind.TELEPHOTO
+        else -> LensKind.MAIN
+    }
+
+    private enum class LensKind {
+        MAIN,
+        ULTRA_WIDE,
+        TELEPHOTO;
+
+        fun matches(requestedLens: String?): Boolean = when (requestedLens) {
+            null, "auto", "main" -> this == MAIN
+            "ultrawide" -> this == ULTRA_WIDE
+            "telephoto" -> this == TELEPHOTO
             else -> false
         }
     }
 
-    data class SupportedPair(
-        val primary: androidx.camera.core.CameraInfo,
-        val secondary: androidx.camera.core.CameraInfo,
-        val primarySelector: CameraSelector,
-        val secondarySelector: CameraSelector,
-    )
 }

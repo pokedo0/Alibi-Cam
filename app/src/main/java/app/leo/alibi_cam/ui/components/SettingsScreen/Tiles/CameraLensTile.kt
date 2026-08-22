@@ -17,7 +17,6 @@ import app.leo.alibi_cam.R
 import app.leo.alibi_cam.dataStore
 import app.leo.alibi_cam.db.AppSettings
 import app.leo.alibi_cam.db.VideoRecorderSettings
-import app.leo.alibi_cam.ui.components.atoms.ExampleListRoulette
 import app.leo.alibi_cam.ui.components.atoms.SettingsTile
 import app.leo.alibi_cam.ui.utils.IconResource
 import com.maxkeppeker.sheets.core.models.base.Header
@@ -171,16 +170,6 @@ fun CameraLensTile(
                 shape = MaterialTheme.shapes.medium,
             ) {
                 Text(currentLabel)
-            }
-        },
-        extra = {
-            if (!isDualMode) {
-                ExampleListRoulette(
-                    items = listOf(null, "auto", "main", "ultrawide", "telephoto", "front"),
-                    onItemSelected = ::updateSingleValue,
-                ) {
-                    Text(stringResource(R.string.ui_settings_value_auto_label))
-                }
             }
         },
     )

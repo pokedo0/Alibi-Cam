@@ -16,7 +16,6 @@ import app.leo.alibi_cam.R
 import app.leo.alibi_cam.dataStore
 import app.leo.alibi_cam.db.AppSettings
 import app.leo.alibi_cam.db.VideoRecorderSettings
-import app.leo.alibi_cam.ui.components.atoms.ExampleListRoulette
 import app.leo.alibi_cam.ui.components.atoms.SettingsTile
 import app.leo.alibi_cam.ui.utils.IconResource
 import com.maxkeppeker.sheets.core.models.base.Header
@@ -96,14 +95,6 @@ fun VideoAspectRatioTile(
                 shape = MaterialTheme.shapes.medium,
             ) {
                 Text(currentLabel)
-            }
-        },
-        extra = {
-            ExampleListRoulette(
-                items = listOf(null, "4:3", "16:9"),
-                onItemSelected = ::updateValue,
-            ) {
-                Text("4:3")
             }
         },
     )

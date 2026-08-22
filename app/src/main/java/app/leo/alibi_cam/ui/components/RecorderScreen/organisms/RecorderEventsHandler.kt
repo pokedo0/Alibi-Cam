@@ -22,8 +22,10 @@ import app.leo.alibi_cam.db.AppSettings
 import app.leo.alibi_cam.db.RecordingInformation
 import app.leo.alibi_cam.helpers.AudioBatchesFolder
 import app.leo.alibi_cam.helpers.BatchesFolder
+import app.leo.alibi_cam.helpers.CameraPosition
 import app.leo.alibi_cam.helpers.VideoBatchesFolder
 import app.leo.alibi_cam.services.IntervalRecorderService
+import app.leo.alibi_cam.services.VideoRecorderService
 import app.leo.alibi_cam.ui.components.RecorderScreen.atoms.BatchesInaccessibleDialog
 import app.leo.alibi_cam.ui.components.RecorderScreen.atoms.RecorderErrorDialog
 import app.leo.alibi_cam.ui.components.RecorderScreen.atoms.RecorderProcessingDialog
@@ -78,12 +80,6 @@ fun RecorderEventsHandler(
         }
     }
     val saveVideoFile = rememberFileSaverDialog(settings.videoRecorderSettings.getMimeType()) {
-        if (settings.deleteRecordingsImmediately) {
-            runCatching {
-                videoRecorder.batchesFolder?.deleteRecordings()
-            }
-        }
-
         if (videoRecorder.batchesFolder?.hasRecordingsAvailable() == false) {
             scope.launch {
                 dataStore.updateData {
@@ -158,9 +154,10 @@ fun RecorderEventsHandler(
                         recorder.recorderService?.lockFiles()
                     }
 
+                    val activeRecording = recorder.recorderService?.getRecordingInformation()
                     val recording =
                         // When new recording created
-                        recorder.recorderService?.getRecordingInformation()
+                        activeRecording
                         // When recording is loaded from lastRecording
                             ?: settings.lastRecording
                             ?: throw Exception("No recording information available")
@@ -171,13 +168,40 @@ fun RecorderEventsHandler(
                             context
                         )
 
-                        VideoRecorderModel::class.java -> VideoBatchesFolder.importFromFolder(
-                            recording.folderPath,
-                            context
-                        ).also {
+                        VideoRecorderModel::class.java -> {
+                            val videoModel = recorder as VideoRecorderModel
+                            val primaryPosition = if (activeRecording != null) {
+                                videoModel.recorderService
+                                    ?.batchesFolder
+                                    ?.cameraPosition
+                                    ?: CameraPosition.SINGLE
+                            } else if (recording.sessionId != null &&
+                                    settings.videoRecorderSettings.dualCameraEnabled
+                            ) {
+                                CameraPosition.fromLensString(settings.videoRecorderSettings.cameraLens)
+                            } else {
+                                CameraPosition.SINGLE
+                            }
+                            Log.i(
+                                "RecorderEventsHandler",
+                                "🎞️ Import primary video folder: position=$primaryPosition " +
+                                    "suffix=${primaryPosition.folderSuffix} session=${recording.sessionId} " +
+                                    "folder=${recording.folderPath}",
+                            )
+                            VideoBatchesFolder.importFromFolder(
+                                recording.folderPath,
+                                context,
+                                primaryPosition,
+                            ).also {
                             // Restore sessionId so getBatchesForFFmpeg() filters
                             // only this session's chunks.
                             it.sessionId = recording.sessionId
+                                Log.i(
+                                    "RecorderEventsHandler",
+                                    "🎞️ Primary folder ready: position=${it.cameraPosition} " +
+                                        "subfolder=${it.subfolderName} session=${it.sessionId}",
+                                )
+                            }
                         }
 
                         else -> throw Exception("Unknown recorder type")
@@ -188,19 +212,77 @@ fun RecorderEventsHandler(
                         recording.fileExtension,
                     )
 
-                    // ── Video MEDIA/CUSTOM: chunks already accessible ──
-                    // For INTERNAL, fall through to the type switch for SAF export.
-                    if ((recorder as Any) is VideoRecorderModel && batchesFolder.type != BatchesFolder.BatchType.INTERNAL) {
-                        showSnackbar()
-                        return@runBlocking
-                    }
+                    var primaryMergedInternalFile: java.io.File? = null
+                    val videoRecorderModel = (recorder as Any) as? VideoRecorderModel
+                    if (videoRecorderModel != null) {
+                        val primaryVideoFolder = batchesFolder as? VideoBatchesFolder
+                            ?: throw Exception("Video recorder has non-video batches folder")
+                        val videoFolders = buildList {
+                            add(primaryVideoFolder)
+                            (videoRecorderModel.recorderService as? VideoRecorderService)
+                                ?.secondaryBatchesFolder
+                                ?.let(::add)
+                        }
 
-                    // ── Concatenation: MEDIA/CUSTOM only ──
-                    // INTERNAL storage skips FFmpeg entirely — individual chunks
-                    // are already playable MP4/AAC files and can be exported as-is.
-                    // This also avoids FFmpegKit dependency issues (missing
-                    // smartexception library in the 6.0-2.LTS AAR from Appodeal).
-                    if (batchesFolder.type != BatchesFolder.BatchType.INTERNAL) {
+                        videoFolders.forEachIndexed { index, folder ->
+                            val sourceChunkNames = folder.listSessionChunkNames()
+                            val outputFileName = if (index == 0) {
+                                fileName
+                            } else {
+                                val baseName = fileName.substringBeforeLast('.')
+                                val suffix = folder.cameraPosition.fileTag.ifBlank { "secondary" }
+                                "$baseName-$suffix.${recording.fileExtension}"
+                            }
+
+                            Log.i(
+                                "RecorderEventsHandler",
+                                "🎞️ Merge video stream=$index type=${folder.type} " +
+                                    "session=${folder.sessionId} chunks=${sourceChunkNames.size} " +
+                                    "position=${folder.cameraPosition} subfolder=${folder.subfolderName} " +
+                                    "output=$outputFileName",
+                            )
+
+                            val output = try {
+                                folder.concatenate(
+                                    recording,
+                                    filenameFormat = settings.filenameFormat,
+                                    fileName = outputFileName,
+                                    onProgress = { percentage ->
+                                        processingProgress = percentage
+                                    }
+                                )
+                            } catch (error: Exception) {
+                                Log.e(
+                                    "RecorderEventsHandler",
+                                    "🎞️ Merge failed stream=$index; source chunks preserved " +
+                                        "count=${sourceChunkNames.size}",
+                                    error,
+                                )
+                                throw error
+                            }
+
+                            if (index == 0 && folder.type == BatchesFolder.BatchType.INTERNAL) {
+                                primaryMergedInternalFile = folder.asInternalGetOutputFile(outputFileName)
+                            }
+
+                            if (settings.deleteRecordingsImmediately && sourceChunkNames.isNotEmpty()) {
+                                folder.permanentlyDeleteRecordings = settings.permanentlyDeleteRecordings
+                                val deleted = folder.deleteFlatChunks(sourceChunkNames)
+                                Log.i(
+                                    "RecorderEventsHandler",
+                                    "🧹 Deleted merged source chunks stream=$index " +
+                                        "deleted=$deleted/${sourceChunkNames.size} output=$output",
+                                )
+                            } else {
+                                Log.i(
+                                    "RecorderEventsHandler",
+                                    "🧹 Preserved merged source chunks stream=$index " +
+                                        "count=${sourceChunkNames.size} immediateDelete=" +
+                                        settings.deleteRecordingsImmediately,
+                                )
+                            }
+                        }
+                    } else {
                         batchesFolder.concatenate(
                             recording,
                             filenameFormat = settings.filenameFormat,
@@ -214,49 +296,37 @@ fun RecorderEventsHandler(
                     // Save file
                     when (batchesFolder.type) {
                         BatchesFolder.BatchType.INTERNAL -> {
-                            // Export individual chunks without FFmpeg merging.
-                            // Each chunk is a self-contained playable media file.
+                            // Export the merged primary file. Secondary dual output
+                            // remains in its separate position folder.
                             // SAF launch MUST be on the main thread — we are inside
                             // thread { runBlocking { } } which is a background thread.
                             val mainHandler = Handler(Looper.getMainLooper())
-                            // List files directly — VideoBatchesFolder.getBatchesForFFmpeg()
-                            // uses session-prefix filtering (listSessionChunkNames) which
-                            // doesn't match INTERNAL flat-storage naming (1.mp4, 2.mp4…).
-                            val internalDir = batchesFolder.getInternalFolder()
-                            val chunkFiles = (internalDir.listFiles()
-                                ?.filter { it.isFile && (it.nameWithoutExtension.toLongOrNull() != null || it.name.startsWith(batchesFolder.mediaPrefix)) }
-                                ?.sortedBy { it.name }
-                                ?: emptyList())
-                            if (chunkFiles.isNotEmpty()) {
-                                when (batchesFolder) {
-                                    is AudioBatchesFolder -> {
-                                        mainHandler.post {
-                                            saveAudioFile(chunkFiles.first(), fileName)
-                                        }
-                                    }
-                                    is VideoBatchesFolder -> {
-                                        mainHandler.post {
-                                            saveVideoFile(chunkFiles.first(), fileName)
-                                        }
+                            val mergedFile = when (batchesFolder) {
+                                is AudioBatchesFolder -> batchesFolder.asInternalGetOutputFile(fileName)
+                                is VideoBatchesFolder -> primaryMergedInternalFile
+                                else -> null
+                            }
+                            if (mergedFile?.isFile == true) {
+                                mainHandler.post {
+                                    when (batchesFolder) {
+                                        is AudioBatchesFolder -> saveAudioFile(mergedFile, fileName)
+                                        is VideoBatchesFolder -> saveVideoFile(mergedFile, fileName)
                                     }
                                 }
+                            } else {
+                                Log.w(
+                                    "RecorderEventsHandler",
+                                    "🎞️ Merged internal video output unavailable: $fileName",
+                                )
                             }
                         }
 
                         BatchesFolder.BatchType.CUSTOM -> {
                             showSnackbar(batchesFolder.customFolder!!.uri)
-
-                            if (settings.deleteRecordingsImmediately) {
-                                batchesFolder.deleteRecordings()
-                            }
                         }
 
                         BatchesFolder.BatchType.MEDIA -> {
                             showSnackbar()
-
-                            if (settings.deleteRecordingsImmediately) {
-                                batchesFolder.deleteRecordings()
-                            }
                         }
                     }
                 } catch (error: Exception) {
