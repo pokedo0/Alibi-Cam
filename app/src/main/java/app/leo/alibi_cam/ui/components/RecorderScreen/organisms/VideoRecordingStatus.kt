@@ -259,7 +259,9 @@ fun _PrimitiveControls(videoRecorder: VideoRecorderModel) {
 @Composable
 fun _VideoControls(videoRecorder: VideoRecorderModel) {
     if (!videoRecorder.isStartingRecording) {
-        val cameraControl = videoRecorder.recorderService!!.cameraControl!!
+        // Camera2 physical-dual mode records without a CameraX CameraControl;
+        // torch controls are unavailable in that backend.
+        val cameraControl = videoRecorder.recorderService?.cameraControl ?: return
         if (cameraControl.hasTorchAvailable()) {
             var torchEnabled by rememberSaveable { mutableStateOf(cameraControl.torchEnabled) }
 

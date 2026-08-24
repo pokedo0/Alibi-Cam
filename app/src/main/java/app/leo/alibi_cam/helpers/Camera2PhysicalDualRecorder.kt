@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
@@ -29,10 +30,13 @@ import app.leo.alibi_cam.db.AppSettings
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 import java.io.Closeable
 import java.io.File
 import kotlin.coroutines.resume
@@ -75,6 +79,8 @@ class Camera2PhysicalDualRecorder(
     private val outputDescriptors = mutableListOf<ParcelFileDescriptor>()
     private val segmentTargets = linkedMapOf<Long, SegmentTargets>()
     private var currentCounter: Long? = null
+    private val supportedVideoSizes = ConcurrentHashMap<Pair<String, Boolean>, Pair<Int, Int>>()
+    private val sensorOrientations = ConcurrentHashMap<String, Int>()
 
     private data class OutputTarget(
         val uri: Uri? = null,
@@ -146,13 +152,22 @@ class Camera2PhysicalDualRecorder(
             primarySurface = primaryRecorder!!.surface
             secondarySurface = secondaryRecorder!!.surface
 
+            if (cameraDevice != null) {
+                Log.i(TAG, "♻️ Reusing open CameraDevice for next physical dual segment")
+                CameraDebugLog.append("♻️ Reuse CameraDevice for counter=$counter")
+                createDualCaptureSession(onStarted, onError)
+                return
+            }
+
+            val openStartedAtMs = SystemClock.elapsedRealtime()
             cameraManager.openCamera(
                 logicalCameraId,
                 object : CameraDevice.StateCallback() {
                     override fun onOpened(device: CameraDevice) {
                         cameraDevice = device
-                        Log.i(TAG, "📸 Camera $logicalCameraId opened for physical dual streaming")
-                        CameraDebugLog.append("📸 Camera $logicalCameraId opened for physical dual streaming")
+                        val openDurationMs = SystemClock.elapsedRealtime() - openStartedAtMs
+                        Log.i(TAG, "📸 Camera $logicalCameraId opened for physical dual streaming in ${openDurationMs}ms")
+                        CameraDebugLog.append("📸 Camera $logicalCameraId opened in ${openDurationMs}ms")
 
                         createDualCaptureSession(onStarted, onError)
                     }
@@ -293,6 +308,12 @@ class Camera2PhysicalDualRecorder(
     }
 
     private fun getSupportedVideoSize(cameraId: String, target16_9: Boolean): Pair<Int, Int> {
+        return supportedVideoSizes.getOrPut(cameraId to target16_9) {
+            querySupportedVideoSize(cameraId, target16_9)
+        }
+    }
+
+    private fun querySupportedVideoSize(cameraId: String, target16_9: Boolean): Pair<Int, Int> {
         try {
             val chars = cameraManager.getCameraCharacteristics(cameraId)
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -300,21 +321,22 @@ class Camera2PhysicalDualRecorder(
 
             Log.i(TAG, "🔍 Camera $cameraId supported MediaRecorder sizes: ${sizes.map { "${it.width}x${it.height}" }}")
 
-            if (target16_9) {
-                sizes.firstOrNull { it.width == 1920 && it.height == 1080 }?.let { return Pair(1920, 1080) }
-                sizes.firstOrNull { it.width == 1280 && it.height == 720 }?.let { return Pair(1280, 720) }
+            val selectedSize = if (target16_9) {
+                sizes.firstOrNull { it.width == 1920 && it.height == 1080 }
+                    ?: sizes.firstOrNull { it.width == 1280 && it.height == 720 }
+                    ?: sizes.firstOrNull { it.width == 1920 && it.height == 1080 }
             } else {
-                sizes.firstOrNull { it.width == 1440 && it.height == 1080 }?.let { return Pair(1440, 1080) }
-                sizes.firstOrNull { it.width == 1280 && it.height == 960 }?.let { return Pair(1280, 960) }
+                sizes.firstOrNull { it.width == 1440 && it.height == 1080 }
+                    ?: sizes.firstOrNull { it.width == 1280 && it.height == 960 }
+                    ?: sizes.firstOrNull { it.width == 1920 && it.height == 1080 }
             }
 
-            // Fallbacks
-            sizes.firstOrNull { it.width == 1920 && it.height == 1080 }?.let { return Pair(1920, 1080) }
-            sizes.firstOrNull { it.width == 1280 && it.height == 720 }?.let { return Pair(1280, 720) }
+            return selectedSize?.let { Pair(it.width, it.height) }
+                ?: if (target16_9) Pair(1920, 1080) else Pair(1440, 1080)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to query supported sizes for $cameraId", e)
+            return if (target16_9) Pair(1920, 1080) else Pair(1440, 1080)
         }
-        return if (target16_9) Pair(1920, 1080) else Pair(1440, 1080)
     }
 
     private fun createMediaRecorder(
@@ -371,12 +393,16 @@ class Camera2PhysicalDualRecorder(
     }
 
     private fun getOrientationHint(physicalCameraId: String): Int {
-        val sensorOrientation = runCatching {
-            cameraManager.getCameraCharacteristics(physicalCameraId)
-                .get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-        }.getOrElse {
-            Log.w(TAG, "🧭 Failed to query sensor orientation for $physicalCameraId", it)
-            0
+        val sensorOrientation = sensorOrientations.getOrPut(physicalCameraId) {
+            runCatching {
+                cameraManager.getCameraCharacteristics(physicalCameraId)
+                    .get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+            }.getOrElse {
+                Log.w(TAG, "🧭 Failed to query sensor orientation for $physicalCameraId", it)
+                0
+            }.also { orientation ->
+                Log.i(TAG, "🧭 Cached sensor orientation for $physicalCameraId: $orientation")
+            }
         }
         val displayRotation = runCatching {
             context.getSystemService(WindowManager::class.java)?.defaultDisplay?.rotation ?: Surface.ROTATION_0
@@ -419,7 +445,7 @@ class Camera2PhysicalDualRecorder(
     ): OutputTarget {
         return when (folder.type) {
             BatchesFolder.BatchType.INTERNAL -> {
-                OutputTarget(file = folder.asInternalGetFile(counter, ext), label = fileName).also {
+                OutputTarget(file = folder.asInternalGetOutputFile(fileName), label = fileName).also {
                     it.file!!.parentFile?.mkdirs()
                 }
             }
@@ -433,7 +459,7 @@ class Camera2PhysicalDualRecorder(
                 val actualName = if (folder.taskFolderName != null) {
                     "%03d.%s".format(counter, ext)
                 } else {
-                    "$counter.$ext"
+                    fileName
                 }
                 val file = parent.createFile("video/$ext", actualName)
                     ?: error("Cannot create custom output file $actualName")
@@ -480,6 +506,7 @@ class Camera2PhysicalDualRecorder(
             return true
         }
 
+        val rotationStartMs = SystemClock.elapsedRealtime()
         Log.i(TAG, "🔄 Rotating physical segment: current=$currentCounter next=$counter")
         CameraDebugLog.append("🔄 Physical segment restart: current=$currentCounter next=$counter")
         isRecording = false
@@ -488,7 +515,11 @@ class Camera2PhysicalDualRecorder(
         val started = startAndAwait(counter)
         if (started) {
             Log.i(TAG, "🔄 ✅ Physical segment restarted at counter=$counter")
-            CameraDebugLog.append("🔄 ✅ Physical segment restarted counter=$counter")
+            Log.i(TAG, "🔄 Physical segment rotation completed in ${SystemClock.elapsedRealtime() - rotationStartMs}ms")
+            CameraDebugLog.append(
+                "🔄 ✅ Physical segment restarted counter=$counter " +
+                    "total=${SystemClock.elapsedRealtime() - rotationStartMs}ms",
+            )
         } else {
             Log.e(TAG, "🔄 ❌ Physical segment restart failed at counter=$counter")
             CameraDebugLog.append("❌ Physical segment restart failed counter=$counter")
@@ -575,6 +606,8 @@ class Camera2PhysicalDualRecorder(
     }
 
     private suspend fun stopCurrentCaptureAndRecorders(stopBackground: Boolean) {
+        val stopStartMs = SystemClock.elapsedRealtime()
+        val surfacesToRelease = listOfNotNull(primarySurface, secondarySurface)
         val ready = requestCaptureStop()
         if (ready != null) {
             withTimeoutOrNull(1500L) {
@@ -582,13 +615,25 @@ class Camera2PhysicalDualRecorder(
             } ?: Log.w(TAG, "📸 Timed out waiting for capture session ready")
         }
         finishCaptureStop()
-        finalizeRecorders(stopBackground)
+        if (stopBackground) {
+            finalizeRecorders(stopBackground)
+        } else {
+            finalizeRecordersConcurrently(stopBackground)
+        }
+        releaseSurfaces(surfacesToRelease)
+        Log.i(
+            TAG,
+            "⏹️ Physical capture/recorders stopped in ${SystemClock.elapsedRealtime() - stopStartMs}ms " +
+                "(keepCamera=${!stopBackground})",
+        )
     }
 
     private fun stopCurrentCaptureAndRecordersBlocking(stopBackground: Boolean) {
+        val surfacesToRelease = listOfNotNull(primarySurface, secondarySurface)
         requestCaptureStop()
         finishCaptureStop()
         finalizeRecorders(stopBackground)
+        releaseSurfaces(surfacesToRelease)
     }
 
     private fun requestCaptureStop(): CompletableDeferred<Unit>? {
@@ -621,7 +666,15 @@ class Camera2PhysicalDualRecorder(
         }
     }
 
+    private fun releaseSurfaces(surfaces: List<Surface>) {
+        surfaces.forEachIndexed { index, surface ->
+            runCatching { surface.release() }
+                .onFailure { Log.w(TAG, "Error releasing recorder surface $index", it) }
+        }
+    }
+
     private fun finalizeRecorders(stopBackground: Boolean) {
+        val finalizeStartMs = SystemClock.elapsedRealtime()
         try {
             primaryRecorder?.setOnErrorListener(null)
             primaryRecorder?.setOnInfoListener(null)
@@ -643,16 +696,21 @@ class Camera2PhysicalDualRecorder(
         releaseRecorder(primaryRecorder, "primary")
         releaseRecorder(secondaryRecorder, "secondary")
 
-        try {
-            cameraDevice?.close()
-            cameraDevice = null
-        } catch (e: Exception) {
-            Log.w(TAG, "Error closing camera device", e)
+        if (stopBackground) {
+            try {
+                cameraDevice?.close()
+                cameraDevice = null
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing camera device", e)
+            }
+        } else {
+            Log.d(TAG, "♻️ Keeping CameraDevice open for the next physical dual segment")
         }
 
         commitPendingUris()
         closeOutputDescriptors()
         if (stopBackground) stopBackgroundThread()
+        Log.i(TAG, "⏹️ Physical recorders finalized in ${SystemClock.elapsedRealtime() - finalizeStartMs}ms")
     }
 
     private fun releaseRecorder(recorder: MediaRecorder?, label: String) {
@@ -663,6 +721,77 @@ class Camera2PhysicalDualRecorder(
             Log.i(TAG, "⏹️ Released $label physical recorder")
         }.onFailure { Log.w(TAG, "Error releasing $label physical recorder", it) }
         if (label == "primary") primaryRecorder = null else secondaryRecorder = null
+    }
+
+    /**
+     * Rotation path only. The two MediaRecorders own independent encoders and
+     * output files, so their expensive stop() calls can overlap instead of
+     * serializing on the camera-handler thread.
+     */
+    private suspend fun finalizeRecordersConcurrently(stopBackground: Boolean) {
+        val finalizeStartMs = SystemClock.elapsedRealtime()
+        val primary = primaryRecorder
+        val secondary = secondaryRecorder
+
+        coroutineScope {
+            val primaryJob = primary?.let { recorder ->
+                async(Dispatchers.IO) { finalizeRecorder(recorder, "primary") }
+            }
+            val secondaryJob = secondary?.let { recorder ->
+                async(Dispatchers.IO) { finalizeRecorder(recorder, "secondary") }
+            }
+            primaryJob?.join()
+            secondaryJob?.join()
+        }
+
+        // Do not clear a field if another lifecycle event replaced the recorder.
+        if (primary != null && primaryRecorder === primary) primaryRecorder = null
+        if (secondary != null && secondaryRecorder === secondary) secondaryRecorder = null
+
+        if (stopBackground) {
+            try {
+                cameraDevice?.close()
+                cameraDevice = null
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing camera device", e)
+            }
+        } else {
+            Log.d(TAG, "♻️ Keeping CameraDevice open for the next physical dual segment")
+        }
+
+        commitPendingUris()
+        closeOutputDescriptors()
+        if (stopBackground) stopBackgroundThread()
+        Log.i(
+            TAG,
+            "⏹️ Physical recorders finalized concurrently in " +
+                "${SystemClock.elapsedRealtime() - finalizeStartMs}ms",
+        )
+    }
+
+    private fun finalizeRecorder(recorder: MediaRecorder?, label: String) {
+        if (recorder == null) return
+        val finalizeStartMs = SystemClock.elapsedRealtime()
+
+        try {
+            recorder.setOnErrorListener(null)
+            recorder.setOnInfoListener(null)
+            recorder.stop()
+            Log.i(TAG, "⏹️ $label physical recorder finalized")
+        } catch (e: Exception) {
+            Log.w(TAG, "$label physical recorder stop failed", e)
+        } finally {
+            runCatching {
+                recorder.reset()
+                recorder.release()
+                Log.i(TAG, "⏹️ Released $label physical recorder")
+            }.onFailure { Log.w(TAG, "Error releasing $label physical recorder", it) }
+            Log.i(
+                TAG,
+                "⏹️ $label physical recorder finalized in " +
+                    "${SystemClock.elapsedRealtime() - finalizeStartMs}ms",
+            )
+        }
     }
 
     private fun closeOutputDescriptors() {

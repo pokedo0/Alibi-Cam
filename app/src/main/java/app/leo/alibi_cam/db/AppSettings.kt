@@ -252,6 +252,12 @@ data class RecordingInformation(
     // Flat storage: identifies which session's chunks belong to this recording.
     // Used by VideoBatchesFolder.getBatchesForFFmpeg() to filter chunks during export.
     val sessionId: String? = null,
+    // Dual-camera metadata survives Service destruction, so a background
+    // "Stop & Save" can still locate and merge the secondary stream later.
+    val primaryCameraPositionName: String? = null,
+    val secondaryFolderPath: String? = null,
+    val secondarySessionId: String? = null,
+    val secondaryCameraPositionName: String? = null,
 ) {
     fun hasRecordingsAvailable(context: Context): Boolean =
         when (type) {

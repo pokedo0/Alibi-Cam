@@ -558,19 +558,25 @@ class VideoBatchesFolder(
     fun listSessionChunkNames(): List<String> {
         val sid = sessionId ?: return emptyList()
         val prefix = "${mediaPrefix}${sid}-"
+        fun sorted(names: List<String>): List<String> = names.sortedWith(
+            compareBy { name ->
+                name.substringAfterLast('-').substringBeforeLast('.').toLongOrNull()
+                    ?: Long.MAX_VALUE
+            }
+        )
         return when (type) {
             BatchType.INTERNAL -> {
                 getInternalFolder().listFiles()
                     ?.filter { it.isFile && it.name?.startsWith(prefix) == true }
                     ?.map { it.name!! }
-                    ?.sorted()
+                    ?.let(::sorted)
                     ?: emptyList()
             }
             BatchType.CUSTOM -> {
                 getCustomDefinedFolder().listFiles()
                     .filter { it.isFile && it.name?.startsWith(prefix) == true }
                     .map { it.name!! }
-                    .sorted()
+                    .let(::sorted)
             }
             BatchType.MEDIA -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -587,12 +593,12 @@ class VideoBatchesFolder(
                             if (name.startsWith(prefix)) names.add(name)
                         }
                     }
-                    names.sorted()
+                    sorted(names)
                 } else {
                     legacyMediaFolder.listFiles()
                         ?.filter { it.isFile && it.name?.startsWith(prefix) == true }
                         ?.map { it.name!! }
-                        ?.sorted()
+                        ?.let(::sorted)
                         ?: emptyList()
                 }
             }
@@ -659,6 +665,7 @@ class VideoBatchesFolder(
     fun asCustomGetParcelFileDescriptor(
         counter: Long,
         fileExtension: String,
+        fileName: String? = null,
     ): ParcelFileDescriptor {
         runCatching {
             customParcelFileDescriptor?.close()
@@ -672,13 +679,13 @@ class VideoBatchesFolder(
             getCustomDefinedFolder()
         }
 
-        val fileName = if (taskFolderName != null) {
-            "%03d.%s".format(counter, fileExtension)
-        } else {
-            "$counter.$fileExtension"
+        val outputName = when {
+            taskFolderName != null -> "%03d.%s".format(counter, fileExtension)
+            fileName != null -> fileName
+            else -> "$counter.$fileExtension"
         }
 
-        val file = parentFolder.createFile("video/$fileExtension", fileName)!!
+        val file = parentFolder.createFile("video/$fileExtension", outputName)!!
         val resolver = context.contentResolver.acquireContentProviderClient(file.uri)!!
 
         resolver.use {

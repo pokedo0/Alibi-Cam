@@ -276,4 +276,12 @@
     <!-- 永久删除 / Permanently delete recordings -->
     <string name="ui_settings_option_permanentlyDeleteRecordings_title">Permanently delete recordings</string>
     <string name="ui_settings_option_permanentlyDeleteRecordings_description">When turned off, auto-deleted videos go to the system recycle bin (retained 30 days), which may take up significant storage space over time — we recommend periodically clearing deleted files from your gallery\'s recycle bin. When turned on, videos are permanently deleted immediately, freeing storage right away. Recommended for long-duration recording (e.g. delivery riders).</string>
+
+    <!-- Background quick recording entry points -->
+    <string name="quick_recording_audio_short_label">Record audio</string>
+    <string name="quick_recording_audio_long_label">Start audio recording</string>
+    <string name="quick_recording_audio_disabled">Audio recording unavailable</string>
+    <string name="quick_recording_video_short_label">Record video</string>
+    <string name="quick_recording_video_long_label">Start video recording</string>
+    <string name="quick_recording_video_disabled">Video recording unavailable</string>
 </resources>

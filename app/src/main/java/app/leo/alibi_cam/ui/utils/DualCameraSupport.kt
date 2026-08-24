@@ -115,6 +115,32 @@ object DualCameraSupport {
         return DualPlan(Strategy.NONE)
     }
 
+    /**
+     * Resolve a rear physical-camera pair without initializing CameraX.
+     * Background recording uses this fast path so a cold CameraX provider does
+     * not delay the Camera2 session on devices where CameraX would eventually
+     * choose the same physical-stream strategy.
+     */
+    fun resolvePhysicalDualPlan(
+        context: Context,
+        primaryLens: String?,
+        secondaryLens: String?,
+    ): DualPlan {
+        if (secondaryLens == null ||
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.P ||
+            !isRearLens(primaryLens) ||
+            !isRearLens(secondaryLens)
+        ) {
+            return DualPlan(Strategy.NONE)
+        }
+
+        return findPhysicalPair(context, primaryLens, secondaryLens)?.let {
+            Log.i(TAG, "⚡ Fast physical pair: logical=${it.logicalCameraId}, ${it.primaryPhysicalId} + ${it.secondaryPhysicalId}")
+            CameraDebugLog.append("⚡ Plan=FAST_PHYSICAL ${it.primaryPhysicalId} + ${it.secondaryPhysicalId}")
+            DualPlan(Strategy.PHYSICAL_CAMERA2, physicalPair = it)
+        } ?: DualPlan(Strategy.NONE)
+    }
+
     private fun isRearLens(lens: String?): Boolean =
         lens == null || lens == "auto" || lens == "main" ||
             lens == "ultrawide" || lens == "telephoto"

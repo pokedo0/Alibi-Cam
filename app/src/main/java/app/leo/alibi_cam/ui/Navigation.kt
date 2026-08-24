@@ -1,5 +1,7 @@
 package app.leo.alibi_cam.ui
 
+import android.content.Context
+import android.util.Log
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -27,6 +29,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.core.content.ContextCompat
@@ -39,9 +43,15 @@ import app.leo.alibi_cam.R
 import app.leo.alibi_cam.dataStore
 import app.leo.alibi_cam.helpers.UpdateHelper
 import app.leo.alibi_cam.helpers.UpdateInfo
+import app.leo.alibi_cam.quickrecording.QuickRecordingStarter
+import app.leo.alibi_cam.services.AudioRecorderService
+import app.leo.alibi_cam.services.RecorderService
+import app.leo.alibi_cam.services.VideoRecorderService
 import app.leo.alibi_cam.ui.enums.Screen
+import app.leo.alibi_cam.enums.RecorderState
 import app.leo.alibi_cam.ui.models.AudioRecorderModel
 import app.leo.alibi_cam.ui.models.VideoRecorderModel
+import app.leo.alibi_cam.ui.models.shouldAutoRecordOnAppOpen
 import app.leo.alibi_cam.ui.screens.AboutScreen
 import app.leo.alibi_cam.ui.screens.CustomRecordingNotificationsScreen
 import app.leo.alibi_cam.ui.screens.RecorderScreen
@@ -60,16 +70,31 @@ fun Navigation(
     val navController = rememberNavController()
     val context = LocalContext.current
     val dataStore = context.dataStore
+    val lifecycleOwner = LocalLifecycleOwner.current
     val settings = dataStore
         .data
         .collectAsState(initial = null)
         .value ?: return
 
-    DisposableEffect(Unit) {
-        audioRecorder.bindToService(context)
-        videoRecorder.bindToService(context)
+    DisposableEffect(lifecycleOwner) {
+        // Binding must never create an idle recorder Service. Background-created Services
+        // connect here naturally; uninitialized idle Services caused restore crashes.
+        fun restoreRecorders() {
+            Log.i("Navigation", "Restoring recorder bindings on ${lifecycleOwner.lifecycle.currentState}")
+            audioRecorder.bindToService(context, 0)
+            videoRecorder.bindToService(context, 0)
+        }
+
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                restoreRecorders()
+            }
+        }
+
+        lifecycleOwner.lifecycle.addObserver(observer)
 
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             audioRecorder.unbindFromService(context)
             videoRecorder.unbindFromService(context)
         }
@@ -115,14 +140,35 @@ fun Navigation(
 
     // ── Auto-record on app open ──
     LaunchedEffect(Unit) {
-        if (videoRecorder.isInRecording) return@LaunchedEffect
-        if (!settings.autoRecordOnAppOpen) return@LaunchedEffect
+        QuickRecordingStarter.locked {
+            val videoState = RecorderService.activeState(VideoRecorderService::class.java)
+            val audioState = RecorderService.activeState(AudioRecorderService::class.java)
+            val videoAllowsStart = shouldAutoRecordOnAppOpen(
+                videoState,
+                settings.autoRecordOnAppOpen,
+            )
+            val audioInactive = audioState != RecorderState.RECORDING &&
+                audioState != RecorderState.PAUSED
 
-        navController.navigate(Screen.AudioRecorder.route) {
-            popUpTo(0) { inclusive = true }
+            if (!videoAllowsStart || !audioInactive) {
+                Log.i(
+                    "Navigation",
+                    "Skipping app-open auto-record; audioState=$audioState, " +
+                        "videoState=$videoState, setting=${settings.autoRecordOnAppOpen}",
+                )
+                return@locked
+            }
+
+            Log.i(
+                "Navigation",
+                "Starting app-open auto-record; audioState=$audioState, videoState=$videoState",
+            )
+            navController.navigate(Screen.AudioRecorder.route) {
+                popUpTo(0) { inclusive = true }
+            }
+            videoRecorder.init(context, settings)
+            videoRecorder.startRecording(context, settings)
         }
-        videoRecorder.init(context, settings)
-        videoRecorder.startRecording(context, settings)
     }
 
     NavHost(

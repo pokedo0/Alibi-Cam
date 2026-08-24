@@ -3,6 +3,7 @@ package app.leo.alibi_cam.services
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.content.Intent
+import android.util.Log
 import android.os.Binder
 import android.os.IBinder
 import androidx.core.app.NotificationManagerCompat
@@ -14,6 +15,7 @@ import app.leo.alibi_cam.ui.utils.PermissionHelper
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import java.time.LocalDateTime
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -26,10 +28,26 @@ abstract class RecorderService : LifecycleService() {
     lateinit var recordingStart: LocalDateTime
         private set
     private lateinit var recordingTimeTimer: ScheduledExecutorService
+    private var recordingTimeTimerStarted = false
     private var notificationDetails: RecorderNotificationHelper.NotificationDetails? = null
 
     var state = RecorderState.IDLE
         private set
+
+    companion object {
+        private const val TAG = "RecorderService"
+
+        private val activeServices =
+            ConcurrentHashMap<Class<out RecorderService>, RecorderService>()
+
+        fun activeState(serviceClass: Class<out RecorderService>): RecorderState? {
+            return activeServices[serviceClass]?.state
+        }
+
+        fun activeService(serviceClass: Class<out RecorderService>): RecorderService? {
+            return activeServices[serviceClass]
+        }
+    }
 
     var onStateChange: ((RecorderState) -> Unit)? = null
     var onError: () -> Unit = {}
@@ -39,21 +57,25 @@ abstract class RecorderService : LifecycleService() {
         private set
 
     protected open fun start() {
-        createRecordingTimeTimer()
+        if (!shouldDelayRecordingTimeUntilReady()) {
+            startRecordingTimeTimerIfNeeded()
+        }
     }
+
+    protected open fun shouldDelayRecordingTimeUntilReady(): Boolean = false
 
     protected open fun pause() {
         isPaused = true
 
-        recordingTimeTimer.shutdown()
+        stopRecordingTimeTimer()
     }
 
     protected open fun resume() {
-        createRecordingTimeTimer()
+        startRecordingTimeTimerIfNeeded()
     }
 
     protected open suspend fun stop() {
-        recordingTimeTimer.shutdown()
+        stopRecordingTimeTimer()
     }
 
     protected abstract fun startForegroundService()
@@ -100,6 +122,18 @@ abstract class RecorderService : LifecycleService() {
         return binder
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        activeServices[javaClass] = this
+        android.util.Log.d("RecorderService", "Registered ${javaClass.simpleName}; state=$state")
+    }
+
+    override fun onDestroy() {
+        activeServices.remove(javaClass, this)
+        android.util.Log.d("RecorderService", "Unregistered ${javaClass.simpleName}; state=$state")
+        super.onDestroy()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             "init" -> {
@@ -108,6 +142,16 @@ abstract class RecorderService : LifecycleService() {
                         RecorderNotificationHelper.NotificationDetails.serializer(),
                         it
                     )
+                }
+
+                // Promote the process before a no-display shortcut trampoline finishes.
+                // Waiting for the recorder model's binder callback leaves a short
+                // background gap that some OEM camera HALs treat as a cold request.
+                try {
+                    Log.i(TAG, "Early foreground promotion for ${javaClass.simpleName}")
+                    startForegroundService()
+                } catch (error: Exception) {
+                    Log.e(TAG, "Early foreground promotion failed", error)
                 }
             }
 
@@ -131,6 +175,7 @@ abstract class RecorderService : LifecycleService() {
     }
 
     private fun createRecordingTimeTimer() {
+        recordingTimeTimerStarted = true
         recordingTimeTimer = Executors.newSingleThreadScheduledExecutor().also {
             it.scheduleAtFixedRate(
                 {
@@ -142,6 +187,20 @@ abstract class RecorderService : LifecycleService() {
                 TimeUnit.SECONDS
             )
         }
+    }
+
+    protected fun startRecordingTimeTimerIfNeeded() {
+        if (recordingTimeTimerStarted) return
+
+        Log.i(TAG, "⏱️ Starting recording-time timer after recorder readiness")
+        createRecordingTimeTimer()
+    }
+
+    protected fun stopRecordingTimeTimer() {
+        if (!recordingTimeTimerStarted) return
+
+        recordingTimeTimer.shutdown()
+        recordingTimeTimerStarted = false
     }
 
     // Used to change the state of the service

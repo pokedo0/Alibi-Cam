@@ -2,6 +2,7 @@ package app.leo.alibi_cam.ui.models
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -53,11 +54,13 @@ class AudioRecorderModel :
         // `onServiceConnected` may be called when reconnecting to the service,
         // so we only want to actually start the recording if the service is idle and thus
         // not already recording
-        if (service.state == RecorderState.IDLE) {
+        if (service.state == RecorderState.IDLE && settings != null) {
             // Do NOT wipe prior recordings — rolling-window pruning
             // (deleteOldRecordings) handles storage limits across sessions.
             service.startRecording()
             onRecordingStart()
+        } else if (service.state == RecorderState.IDLE && settings == null) {
+            Log.i("AudioRecorderModel", "Skipping idle audio start; model has no caller-supplied settings")
         }
 
         recorderState = service.state

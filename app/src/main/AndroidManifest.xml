@@ -28,6 +28,7 @@
 
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.NFC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
 
@@ -65,7 +66,17 @@
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
+        <activity
+            android:name=".quickrecording.QuickRecordingShortcutActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Alibi.QuickRecordingInvisible" />
         <receiver
             android:name=".receivers.LocalChangeReceiver"
             android:exported="false">
@@ -81,6 +92,27 @@
         <service
             android:name=".services.VideoRecorderService"
             android:foregroundServiceType="camera|microphone" />
+
+        <service
+            android:name=".quickrecording.AudioRecordingTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_audio"
+            android:label="@string/quick_recording_audio_short_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <service
+            android:name=".quickrecording.VideoRecordingTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_video"
+            android:label="@string/quick_recording_video_short_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <!-- Change locale for Android <= 12 -->
         <service

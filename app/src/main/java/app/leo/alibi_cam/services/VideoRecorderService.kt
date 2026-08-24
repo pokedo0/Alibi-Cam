@@ -46,6 +46,7 @@ import app.leo.alibi_cam.enums.RecorderState
 import app.leo.alibi_cam.helpers.BatchesFolder
 import app.leo.alibi_cam.helpers.Camera2PhysicalDualRecorder
 import app.leo.alibi_cam.helpers.VideoBatchesFolder
+import app.leo.alibi_cam.ui.RECORDER_INTERNAL_SELECTED_VALUE
 import app.leo.alibi_cam.ui.SUPPORTS_SAVING_VIDEOS_IN_CUSTOM_FOLDERS
 import app.leo.alibi_cam.ui.SUPPORTS_SCOPED_STORAGE
 import app.leo.alibi_cam.helpers.CameraDebugLog
@@ -94,6 +95,9 @@ class VideoRecorderService :
         var activeRecordingFinalizer: CompletableDeferred<Unit>? = null
 
         @Volatile
+        var activeRecordingStart: CompletableDeferred<Unit>? = null
+
+        @Volatile
         var previousRecordingFinalizer: CompletableDeferred<Unit>? = null
     }
 
@@ -120,9 +124,18 @@ class VideoRecorderService :
     /** Whether dual camera is currently active (both streams recording). */
     fun isDualCameraActive(): Boolean = isDualMode
 
+    /**
+     * Some OEM camera HALs defer background openCamera calls until they decide
+     * that the caller is still the top app. Expose actual pipeline readiness so
+     * the invisible shortcut Activity can stay foreground until capture starts.
+     */
+    val isCapturePipelineReady: Boolean
+        get() = cameraControl != null || physicalDualRecorder?.isRecording == true
+
     // ── 传感器自动停止 ──
     private var sensorManager: SensorManager? = null
     private var rotationSensor: Sensor? = null
+    private var recordingWakeLock: PowerManager.WakeLock? = null
     private var referenceQuaternion: FloatArray? = null
     private var deviationStartTime: Long = 0L
     private var autoStopWarningActive = false
@@ -183,6 +196,11 @@ class VideoRecorderService :
         return super.onStartCommand(intent, flags, startId)
     }
 
+    override fun onDestroy() {
+        releaseRecordingWakeLock("destroy")
+        super.onDestroy()
+    }
+
     override fun start() {
         // Flat storage: all chunks go directly into the base folder
         // (DCIM/alibi/.video_recordings/) with session-scoped names like
@@ -197,6 +215,7 @@ class VideoRecorderService :
         Log.i(TAG, "📁 Session: $sessionId (flat storage)")
         CameraDebugLog.append("📁 Session: $sessionId (flat)")
 
+        acquireRecordingWakeLock()
         super.start()
 
         scope.launch {
@@ -206,22 +225,28 @@ class VideoRecorderService :
         startOrientationMonitoring()
     }
 
+    override fun shouldDelayRecordingTimeUntilReady(): Boolean = true
+
     override suspend fun stop() {
-        stopOrientationMonitoring()
-        super.stop()
+        try {
+            stopOrientationMonitoring()
+            super.stop()
 
-        stopActiveRecording()
+            stopActiveRecording()
 
-        // Camera can only be closed after the recording has been finalized
-        withTimeoutOrNull(CAMERA_CLOSE_TIMEOUT) {
-            primary.activeRecordingFinalizer?.await()
-            secondary?.activeRecordingFinalizer?.await()
-        }
+            // Camera can only be closed after the recording has been finalized
+            withTimeoutOrNull(CAMERA_CLOSE_TIMEOUT) {
+                primary.activeRecordingFinalizer?.await()
+                secondary?.activeRecordingFinalizer?.await()
+            }
 
-        closeCamera()
+            closeCamera()
 
-        withTimeoutOrNull(CAMERA_CLOSE_TIMEOUT) {
-            _cameraCloserListener.await()
+            withTimeoutOrNull(CAMERA_CLOSE_TIMEOUT) {
+                _cameraCloserListener.await()
+            }
+        } finally {
+            releaseRecordingWakeLock("stop")
         }
     }
 
@@ -229,6 +254,40 @@ class VideoRecorderService :
         super.pause()
 
         stopActiveRecording()
+        releaseRecordingWakeLock("pause")
+    }
+
+    override fun resume() {
+        super.resume()
+        acquireRecordingWakeLock()
+    }
+
+    private fun acquireRecordingWakeLock() {
+        if (recordingWakeLock?.isHeld == true) return
+
+        try {
+            val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+            recordingWakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "AlibiCam:VideoRecording",
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            Log.i(TAG, "🔋 Acquired video recording WakeLock")
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to acquire video recording WakeLock", error)
+        }
+    }
+
+    private fun releaseRecordingWakeLock(reason: String) {
+        recordingWakeLock?.let { wakeLock ->
+            if (wakeLock.isHeld) {
+                wakeLock.release()
+                Log.i(TAG, "🔋 Released video recording WakeLock ($reason)")
+            }
+        }
+        recordingWakeLock = null
     }
 
     override fun startForegroundService() {
@@ -259,6 +318,15 @@ class VideoRecorderService :
             Log.i(TAG, "🔄 startNewCycle: counter=$counter, interval=${settings.intervalDuration}ms, isDualMode=$isDualMode")
             CameraDebugLog.append("🔄 startNewCycle: counter=$counter, interval=${settings.intervalDuration}ms, dual=$isDualMode")
 
+            val isRestartBoundary = _cameraAvailableListener.isCompleted
+            if (isRestartBoundary) {
+                // Segment finalization can take seconds on physical-dual devices.
+                // Keep the user-facing timer aligned with captured video instead
+                // of counting the camera restart gap.
+                Log.d(TAG, "⏱️ Pausing recording-time timer during segment rotation")
+                stopRecordingTimeTimer()
+            }
+
             fun action() {
                 if (physicalDualRecorder?.isRecording == true) {
                     // The interval timer runs on its own scheduler thread. Wait
@@ -279,16 +347,37 @@ class VideoRecorderService :
                 }
             }
 
-            if (_cameraAvailableListener.isCompleted) {
-                action()
-            } else {
-                // Race condition of `startNewCycle` being called before `invokeOnCompletion`
-                // has been called can be ignored, as the camera usually opens within 5 seconds
-                // and the interval can't be set shorter than 10 seconds.
-                _cameraAvailableListener.invokeOnCompletion {
-                    action()
+            if (!_cameraAvailableListener.isCompleted) {
+                Log.i(TAG, "⏳ Waiting for camera/recorder readiness before first interval boundary")
+
+                // The interval scheduler thread may block here. Combined with
+                // scheduleWithFixedDelay, the next segment starts intervalDuration
+                // after this segment is actually able to record.
+                val cameraReady = runBlocking {
+                    withTimeoutOrNull(CAMERA_OPEN_TIMEOUT_MS) {
+                        _cameraAvailableListener.await()
+                    }
+                }
+
+                if (cameraReady == null) {
+                    Log.e(TAG, "❌ Camera/recorder did not become ready before interval start")
+                    CameraDebugLog.append("❌ Camera/recorder readiness timeout before interval start")
+                    CameraDebugLog.flush()
+                    return
                 }
             }
+
+            action()
+
+            if (physicalDualRecorder?.isRecording != true) {
+                awaitActualRecordingStart()
+            }
+
+            // The notification timer must measure captured video time, not
+            // shortcut/camera initialization or segment-restart time. CameraX
+            // only reports Start after its encoder receives the first frame;
+            // physical dual's MediaRecorder path is already ready above.
+            startRecordingTimeTimerIfNeeded()
 
             // ── Prune AFTER action() ──
             // At this point the previous chunk has been finalized by stopActiveRecording()
@@ -311,19 +400,84 @@ class VideoRecorderService :
 
         // The currently-active finalizer belongs to the recording we're
         // about to stop. Save it so save flows can await it.
-        stream.previousRecordingFinalizer = stream.activeRecordingFinalizer
+        val previousFinalizer = stream.activeRecordingFinalizer
+        stream.previousRecordingFinalizer = previousFinalizer
+
+        previousFinalizer?.let { finalizer ->
+            try {
+                runBlocking {
+                    withTimeoutOrNull(CHUNK_FINALIZE_TIMEOUT_MS) { finalizer.await() }
+                        ?: Log.w(TAG, "Timed out waiting for previous chunk finalization")
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "Previous chunk finalization await failed", error)
+            }
+        }
         stream.activeRecordingFinalizer = CompletableDeferred()
+        val activeFinalizer = stream.activeRecordingFinalizer
+        stream.activeRecordingStart = CompletableDeferred()
+        val activeStart = stream.activeRecordingStart
 
         val newRecording = prepareVideoRecording(videoCapture, folder)
         stream.activeRecording = newRecording.start(ContextCompat.getMainExecutor(this)) { event ->
-            if (event is VideoRecordEvent.Finalize &&
-                (this@VideoRecorderService.state == RecorderState.STOPPED ||
-                 this@VideoRecorderService.state == RecorderState.PAUSED)) {
-                stream.activeRecordingFinalizer?.complete(Unit)
+            if (event is VideoRecordEvent.Start) {
+                Log.i(TAG, "🎬 First frame captured for stream ${stream.position}")
+                CameraDebugLog.append("🎬 First frame captured: ${stream.position}")
+                activeStart?.complete(Unit)
+            }
+            if (event is VideoRecordEvent.Finalize) {
+                val stats = event.recordingStats
+                if (event.error == 0) {
+                    Log.i(
+                        TAG,
+                        "🎞️ Chunk finalized stream=${stream.position} " +
+                            "bytes=${stats.numBytesRecorded} durationNs=${stats.recordedDurationNanos}",
+                    )
+                } else {
+                    Log.e(
+                        TAG,
+                        "🎞️ Chunk finalized with error=${event.error} stream=${stream.position} " +
+                            "bytes=${stats.numBytesRecorded} durationNs=${stats.recordedDurationNanos}",
+                    )
+                }
+                activeFinalizer?.complete(Unit)
             }
         }
         Log.i(TAG, "🎬 Recording started for stream ${stream.position}")
         CameraDebugLog.append("🎬 Recording started: ${stream.position}")
+    }
+
+    /**
+     * CameraX can return from Recording.start() several seconds before the
+     * encoder emits Start on OEM devices. Waiting here also shifts the next
+     * fixed-delay boundary so a configured 10s chunk contains ~10s of video.
+     */
+    private fun awaitActualRecordingStart() {
+        val startSignals = listOfNotNull(
+            primary.activeRecordingStart,
+            secondary?.activeRecordingStart,
+        )
+
+        if (startSignals.isEmpty()) return
+
+        val waitStartedAtMs = android.os.SystemClock.elapsedRealtime()
+        val ready = runBlocking {
+            withTimeoutOrNull(CAMERA_OPEN_TIMEOUT_MS) {
+                startSignals.map { signal -> signal.await() }
+            }
+        }
+
+        if (ready == null) {
+            Log.w(TAG, "Timed out waiting for actual CameraX recording start")
+            CameraDebugLog.append("⚠️ Actual CameraX recording-start timeout")
+            startSignals.forEach { signal -> signal.complete(Unit) }
+        } else {
+            Log.i(
+                TAG,
+                "⏱️ Actual CameraX capture confirmed in " +
+                    "${android.os.SystemClock.elapsedRealtime() - waitStartedAtMs}ms",
+            )
+        }
     }
 
     /**
@@ -452,17 +606,31 @@ class VideoRecorderService :
      * - If concurrent binding fails, gracefully falls back to single camera.
      */
     private suspend fun openCamera() {
-        cameraProvider = withContext(Dispatchers.IO) {
-            ProcessCameraProvider.getInstance(this@VideoRecorderService).get()
-        }
-
         val dualRequested = settings.videoRecorderSettings.dualCameraEnabled
         val primaryLens = settings.videoRecorderSettings.cameraLens
         val secondaryLens = settings.videoRecorderSettings.secondaryCameraLens
 
+        val cameraStartupStartedAt = android.os.SystemClock.elapsedRealtime()
         val plan = if (dualRequested && secondaryLens != null) {
-            DualCameraSupport.resolveDualPlan(this, cameraProvider!!, primaryLens, secondaryLens)
+            val physicalPlan = DualCameraSupport.resolvePhysicalDualPlan(
+                this,
+                primaryLens,
+                secondaryLens,
+            )
+
+            if (physicalPlan.strategy == DualCameraSupport.Strategy.PHYSICAL_CAMERA2) {
+                Log.i(
+                    TAG,
+                    "⚡ Skipping CameraX provider init for physical dual startup " +
+                        "after ${android.os.SystemClock.elapsedRealtime() - cameraStartupStartedAt}ms",
+                )
+                physicalPlan
+            } else {
+                ensureCameraProvider()
+                DualCameraSupport.resolveDualPlan(this, cameraProvider!!, primaryLens, secondaryLens)
+            }
         } else {
+            ensureCameraProvider()
             DualCameraSupport.DualPlan(DualCameraSupport.Strategy.NONE)
         }
 
@@ -488,6 +656,20 @@ class VideoRecorderService :
                 openSingleCamera()
             }
         }
+    }
+
+    private suspend fun ensureCameraProvider() {
+        if (cameraProvider != null) return
+
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        cameraProvider = withContext(Dispatchers.IO) {
+            ProcessCameraProvider.getInstance(this@VideoRecorderService).get()
+        }
+        Log.i(
+            TAG,
+            "📷 CameraX provider initialized in " +
+                "${android.os.SystemClock.elapsedRealtime() - startedAt}ms",
+        )
     }
 
     /** Bind two physical rear sensors through their common logical camera. */
@@ -528,9 +710,12 @@ class VideoRecorderService :
         physicalDualRecorder!!.start(
             counter = counter,
             onStarted = {
-                _cameraAvailableListener.complete(Unit)
                 Log.i(TAG, "📸 ✅ Physical dual camera recorder ready")
                 CameraDebugLog.append("📸 ✅ Physical dual recorder READY")
+                runOnMain {
+                    _cameraAvailableListener.complete(Unit)
+                    onCameraControlAvailable()
+                }
             },
             onError = { error ->
                 Log.e(TAG, "📸 ❌ Physical dual camera failed: $error")
@@ -539,7 +724,10 @@ class VideoRecorderService :
                     physicalDualRecorder?.stop()
                     physicalDualRecorder = null
                     isDualMode = false
-                    openSingleCamera()
+                    scope.launch {
+                        ensureCameraProvider()
+                        openSingleCamera()
+                    }
                 }
             },
         )
@@ -1017,8 +1205,8 @@ class VideoRecorderService :
         SensorDebugLog.logEvent("AUTO_STOP_EXECUTED")
         lifecycleScope.launch {
             Log.i(TAG, "🛑 Auto-stop triggered — stopping recording")
-            val info = getRecordingInformation()
             stopRecording()
+            val info = getRecordingInformation()
             dataStore.updateData { it.setLastRecording(info) }
             destroy()
             // Exit the app so the next NFC tap triggers a fresh launch
@@ -1091,7 +1279,8 @@ class VideoRecorderService :
                         FileDescriptorOutputOptions.Builder(
                             folder.asCustomGetParcelFileDescriptor(
                                 counter,
-                                settings.videoRecorderSettings.fileExtension
+                                settings.videoRecorderSettings.fileExtension,
+                                fileName = getNameForMediaFile(folder),
                             )
                         ).build()
                     )
@@ -1127,10 +1316,7 @@ class VideoRecorderService :
                     it.prepareRecording(
                         this,
                         FileOutputOptions.Builder(
-                            folder.asInternalGetFile(
-                                counter,
-                                settings.videoRecorderSettings.fileExtension
-                            ).apply {
+                            folder.asInternalGetOutputFile(getNameForMediaFile(folder)).apply {
                                 createNewFile()
                             }
                         ).build()
@@ -1145,8 +1331,9 @@ class VideoRecorderService :
                 this
             }
 
-    override fun getRecordingInformation() =
-        RecordingInformation(
+    override fun getRecordingInformation(): RecordingInformation {
+        val secondaryFolder = secondaryBatchesFolder
+        val information = RecordingInformation(
             folderPath = batchesFolder.exportFolderForSettings(),
             recordingStart = recordingStart,
             maxDuration = settings.maxDuration,
@@ -1155,7 +1342,20 @@ class VideoRecorderService :
             intervalDuration = settings.intervalDuration,
             type = RecordingInformation.Type.VIDEO,
             sessionId = batchesFolder.sessionId,
+            primaryCameraPositionName = batchesFolder.cameraPosition.name,
+            secondaryFolderPath = secondaryFolder?.exportFolderForSettings(),
+            secondarySessionId = secondaryFolder?.sessionId,
+            secondaryCameraPositionName = secondaryFolder?.cameraPosition?.name,
         )
+
+        Log.i(
+            TAG,
+            "💾 Recording information: session=${information.sessionId} chunks=${information.batchesAmount} " +
+                "primary=${batchesFolder.cameraPosition} " +
+                "secondary=${secondaryFolder?.cameraPosition ?: "none"}",
+        )
+        return information
+    }
 
     /**
      * Handles "Stop & Save" from the notification: stops recording, persists
@@ -1166,15 +1366,156 @@ class VideoRecorderService :
      */
     override fun handleStopFromNotification() {
         lifecycleScope.launch {
-            val info = getRecordingInformation()
-            stopRecording()
-            dataStore.updateData { it.setLastRecording(info) }
-            destroy()
+            try {
+                stopRecording()
+                // Capture after the final chunk has finalized, otherwise the last
+                // partial segment and dual audio-mux output can be omitted.
+                val info = getRecordingInformation()
+                Log.i(TAG, "💾 Notification save captured session=${info.sessionId}")
+
+                // Persist first: if FFmpeg fails, the existing app-open recovery
+                // flow can still locate and export every source chunk.
+                dataStore.updateData { it.setLastRecording(info) }
+                val fullyMerged = mergeInBackground(info)
+
+                val isInternalStorage = info.folderPath == RECORDER_INTERNAL_SELECTED_VALUE
+                if (fullyMerged && !isInternalStorage) {
+                    dataStore.updateData { it.setLastRecording(null) }
+                    Log.i(TAG, "💾 Notification merge completed; last recording cleared")
+                } else if (fullyMerged) {
+                    Log.i(
+                        TAG,
+                        "💾 Notification merge completed; retained recovery state " +
+                            "type=${info.folderPath} immediateDelete=${settings.deleteRecordingsImmediately}",
+                    )
+                }
+            } catch (error: Exception) {
+                Log.e(TAG, "💾 Notification stop/save failed", error)
+            } finally {
+                destroy()
+            }
+        }
+    }
+
+    /**
+     * Merges all video streams directly from persisted metadata. Dual camera
+     * produces one output per physical stream; the streams are never combined.
+     */
+    private suspend fun mergeInBackground(info: RecordingInformation): Boolean {
+        return withContext(Dispatchers.IO) {
+            val primaryPosition = info.primaryCameraPositionName
+                ?.let(CameraPosition::valueOf)
+                ?: CameraPosition.SINGLE
+            val primaryFolder = VideoBatchesFolder.importFromFolder(
+                info.folderPath,
+                this@VideoRecorderService,
+                primaryPosition,
+            ).also { folder ->
+                folder.sessionId = info.sessionId
+            }
+
+            val secondaryPosition = info.secondaryCameraPositionName
+                ?.let(CameraPosition::valueOf)
+                ?: CameraPosition.SINGLE
+            val secondaryFolder = info.secondarySessionId?.let { sessionId ->
+                VideoBatchesFolder.importFromFolder(
+                    info.secondaryFolderPath,
+                    this@VideoRecorderService,
+                    secondaryPosition,
+                ).also { folder ->
+                    folder.sessionId = sessionId
+                }
+            }
+
+            val folders = listOfNotNull(primaryFolder, secondaryFolder)
+            val baseName = primaryFolder.getName(info.recordingStart, info.fileExtension)
+                .substringBeforeLast('.')
+
+            data class PendingCleanup(
+                val folder: VideoBatchesFolder,
+                val chunkNames: List<String>,
+            )
+
+            val cleanupCandidates = mutableListOf<PendingCleanup>()
+            var streamIndex = 0
+
+            for (folder in folders) {
+                val chunkNames = folder.listSessionChunkNames()
+                if (chunkNames.isEmpty()) {
+                    Log.w(
+                        TAG,
+                        "💾 Skipping empty notification merge stream=$streamIndex " +
+                            "position=${folder.cameraPosition} session=${folder.sessionId}",
+                    )
+                    if (streamIndex == 0) {
+                        Log.e(TAG, "💾 Primary video stream has no chunks to merge")
+                        return@withContext false
+                    }
+                    streamIndex += 1
+                    continue
+                }
+
+                val outputName = if (streamIndex == 0) {
+                    "$baseName.${info.fileExtension}"
+                } else {
+                    val suffix = folder.cameraPosition.fileTag.ifBlank { "secondary" }
+                    "$baseName-$suffix.${info.fileExtension}"
+                }
+
+                Log.i(
+                    TAG,
+                    "🎞️ Notification merging stream=$streamIndex type=${folder.type} " +
+                        "session=${folder.sessionId} chunks=${chunkNames.size} " +
+                        "position=${folder.cameraPosition} output=$outputName",
+                )
+
+                try {
+                    val output = folder.concatenate(
+                        info,
+                        filenameFormat = settings.filenameFormat,
+                        fileName = outputName,
+                    )
+                    Log.i(TAG, "🎞️ Notification merged stream=$streamIndex output=$output")
+                    cleanupCandidates.add(PendingCleanup(folder, chunkNames))
+                } catch (error: Exception) {
+                    Log.e(
+                        TAG,
+                        "🎞️ Notification merge failed stream=$streamIndex; " +
+                            "source chunks preserved count=${chunkNames.size}",
+                        error,
+                    )
+                    return@withContext false
+                }
+
+                streamIndex += 1
+            }
+
+            if (!settings.deleteRecordingsImmediately) {
+                Log.i(TAG, "🧹 Notification merge preserved source chunks by setting")
+                return@withContext true
+            }
+
+            var deletedCount = 0
+            var totalCount = 0
+            cleanupCandidates.forEach { candidate ->
+                candidate.folder.permanentlyDeleteRecordings =
+                    settings.permanentlyDeleteRecordings
+                deletedCount += candidate.folder.deleteFlatChunks(candidate.chunkNames)
+                totalCount += candidate.chunkNames.size
+            }
+            Log.i(
+                TAG,
+                "🧹 Deleted merged notification source chunks " +
+                    "deleted=$deletedCount/$totalCount",
+            )
+            true
         }
     }
 
     companion object {
         const val CAMERA_CLOSE_TIMEOUT = 20000L
+        private const val CAMERA_OPEN_TIMEOUT_MS = 30000L
+        private const val CHUNK_FINALIZE_TIMEOUT_MS = 2000L
         private const val TAG = "VideoRecorderService"
 
         // ── 传感器自动停止常量 ──

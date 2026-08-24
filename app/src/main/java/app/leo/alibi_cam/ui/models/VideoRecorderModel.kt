@@ -124,7 +124,7 @@ class VideoRecorderModel :
         // `onServiceConnected` may be called when reconnecting to the service,
         // so we only want to actually start the recording if the service is idle and thus
         // not already recording
-        if (service.state == RecorderState.IDLE) {
+        if (service.state == RecorderState.IDLE && settings != null) {
             isStartingRecording = true
 
             // For dual camera mode, create and attach the secondary folder
@@ -147,6 +147,9 @@ class VideoRecorderModel :
             // (deleteOldRecordings) handles storage limits across sessions.
             service.startRecording()
             onRecordingStart()
+        } else if (service.state == RecorderState.IDLE && settings == null) {
+            Log.i(TAG, "Skipping idle video start; model has no caller-supplied settings")
+            isStartingRecording = false
         } else {
             isStartingRecording = false
         }

@@ -1,5 +1,6 @@
 package app.leo.alibi_cam.services
 
+import android.util.Log
 import app.leo.alibi_cam.db.AppSettings
 import app.leo.alibi_cam.helpers.BatchesFolder
 import java.util.concurrent.Executors
@@ -15,7 +16,7 @@ abstract class IntervalRecorderService<I, B : BatchesFolder> :
 
     lateinit var settings: AppSettings
 
-    private lateinit var cycleTimer: ScheduledExecutorService
+    private var cycleTimer: ScheduledExecutorService? = null
 
     abstract var batchesFolder: B
 
@@ -47,8 +48,16 @@ abstract class IntervalRecorderService<I, B : BatchesFolder> :
     }
 
     private fun createTimer() {
+        cycleTimer?.let { oldTimer ->
+            Log.w("IntervalRecorderService", "Replacing an existing recording-cycle timer")
+            oldTimer.shutdownNow()
+        }
+
         cycleTimer = Executors.newSingleThreadScheduledExecutor().also {
-            it.scheduleAtFixedRate(
+            // A long camera-open or segment-restart operation must shift the
+            // next boundary. A fixed rate would keep firing during setup and
+            // truncate the newly started segment (especially physical dual).
+            it.scheduleWithFixedDelay(
                 ::startNewCycle,
                 0,
                 settings.intervalDuration,
@@ -73,7 +82,7 @@ abstract class IntervalRecorderService<I, B : BatchesFolder> :
 
     override fun pause() {
         super.pause()
-        cycleTimer.shutdown()
+        cycleTimer?.shutdown()
     }
 
     override fun resume() {
@@ -82,7 +91,7 @@ abstract class IntervalRecorderService<I, B : BatchesFolder> :
     }
 
     override suspend fun stop() {
-        cycleTimer.shutdown()
+        cycleTimer?.shutdown()
         batchesFolder.cleanup()
         super.stop()
     }

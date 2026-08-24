@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_tile_audio"
+        android:shortcutDisabledMessage="@string/quick_recording_audio_disabled"
+        android:shortcutId="start_audio_recording"
+        android:shortcutLongLabel="@string/quick_recording_audio_long_label"
+        android:shortcutShortLabel="@string/quick_recording_audio_short_label">
+        <intent
+            android:action="app.leo.alibi_cam.action.START_AUDIO_RECORDING"
+            android:targetClass="app.leo.alibi_cam.quickrecording.QuickRecordingShortcutActivity"
+            android:targetPackage="com.blink.academy.protake" />
+    </shortcut>
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_tile_video"
+        android:shortcutDisabledMessage="@string/quick_recording_video_disabled"
+        android:shortcutId="start_video_recording"
+        android:shortcutLongLabel="@string/quick_recording_video_long_label"
+        android:shortcutShortLabel="@string/quick_recording_video_short_label">
+        <intent
+            android:action="app.leo.alibi_cam.action.START_VIDEO_RECORDING"
+            android:targetClass="app.leo.alibi_cam.quickrecording.QuickRecordingShortcutActivity"
+            android:targetPackage="com.blink.academy.protake" />
+    </shortcut>
+</shortcuts>

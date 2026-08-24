@@ -170,17 +170,23 @@ fun RecorderEventsHandler(
 
                         VideoRecorderModel::class.java -> {
                             val videoModel = recorder as VideoRecorderModel
-                            val primaryPosition = if (activeRecording != null) {
-                                videoModel.recorderService
+                            val primaryPosition = when {
+                                activeRecording != null -> videoModel.recorderService
                                     ?.batchesFolder
                                     ?.cameraPosition
                                     ?: CameraPosition.SINGLE
-                            } else if (recording.sessionId != null &&
+
+                                recording.primaryCameraPositionName != null -> CameraPosition.valueOf(
+                                    recording.primaryCameraPositionName
+                                )
+
+                                recording.sessionId != null &&
                                     settings.videoRecorderSettings.dualCameraEnabled
-                            ) {
-                                CameraPosition.fromLensString(settings.videoRecorderSettings.cameraLens)
-                            } else {
-                                CameraPosition.SINGLE
+                                -> CameraPosition.fromLensString(
+                                    settings.videoRecorderSettings.cameraLens
+                                )
+
+                                else -> CameraPosition.SINGLE
                             }
                             Log.i(
                                 "RecorderEventsHandler",
@@ -217,15 +223,45 @@ fun RecorderEventsHandler(
                     if (videoRecorderModel != null) {
                         val primaryVideoFolder = batchesFolder as? VideoBatchesFolder
                             ?: throw Exception("Video recorder has non-video batches folder")
+                        val persistedSecondaryPosition = recording.secondaryCameraPositionName
+                            ?.let(CameraPosition::valueOf)
                         val videoFolders = buildList {
                             add(primaryVideoFolder)
-                            (videoRecorderModel.recorderService as? VideoRecorderService)
+                            val liveSecondaryFolder = (videoRecorderModel.recorderService as? VideoRecorderService)
                                 ?.secondaryBatchesFolder
-                                ?.let(::add)
+                            when {
+                                liveSecondaryFolder != null -> add(liveSecondaryFolder)
+
+                                recording.secondarySessionId != null -> add(
+                                    VideoBatchesFolder.importFromFolder(
+                                        recording.secondaryFolderPath,
+                                        context,
+                                        persistedSecondaryPosition ?: CameraPosition.SINGLE,
+                                    ).also { folder ->
+                                        folder.sessionId = recording.secondarySessionId
+                                        Log.i(
+                                            "RecorderEventsHandler",
+                                            "🎞️ Restored secondary video folder: position=${folder.cameraPosition} " +
+                                                "session=${folder.sessionId} folder=${recording.secondaryFolderPath}",
+                                        )
+                                    }
+                                )
+                            }
                         }
 
                         videoFolders.forEachIndexed { index, folder ->
                             val sourceChunkNames = folder.listSessionChunkNames()
+                            if (sourceChunkNames.isEmpty()) {
+                                Log.w(
+                                    "RecorderEventsHandler",
+                                    "🎞️ Skipping empty video stream=$index position=${folder.cameraPosition} " +
+                                        "session=${folder.sessionId}",
+                                )
+                                if (index == 0) {
+                                    throw Exception("Primary video stream has no source chunks")
+                                }
+                                return@forEachIndexed
+                            }
                             val outputFileName = if (index == 0) {
                                 fileName
                             } else {
@@ -330,7 +366,7 @@ fun RecorderEventsHandler(
                         }
                     }
                 } catch (error: Exception) {
-                    Log.getStackTraceString(error)
+                    Log.e("RecorderEventsHandler", "Recording save/export failed", error)
                 } finally {
                     if (recorder.isCurrentlyActivelyRecording) {
                         recorder.recorderService?.unlockFiles(cleanupOldFiles)
