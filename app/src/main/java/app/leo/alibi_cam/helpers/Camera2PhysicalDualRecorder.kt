@@ -18,6 +18,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Process
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.MediaStore
@@ -63,6 +64,7 @@ class Camera2PhysicalDualRecorder(
 ) {
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    @Volatile
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var captureSessionReady: CompletableDeferred<Unit>? = null
@@ -74,6 +76,12 @@ class Camera2PhysicalDualRecorder(
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
+
+    @Volatile
+    private var isOutputPreparationFailed = false
+
+    /** Called immediately before the logical camera open binder request. */
+    var onLogicalCameraOpen: (() -> Unit)? = null
 
     private val pendingUris = mutableListOf<Uri>()
     private val outputDescriptors = mutableListOf<ParcelFileDescriptor>()
@@ -114,7 +122,14 @@ class Camera2PhysicalDualRecorder(
 
     private fun startBackgroundThread() {
         if (backgroundThread?.isAlive == true) return
-        backgroundThread = HandlerThread("Camera2PhysicalRecorder").also { it.start() }
+        backgroundThread = object : HandlerThread("Camera2PhysicalRecorder") {
+            override fun onLooperPrepared() {
+                // Camera HAL callbacks can arrive on this thread during cold start.
+                // Keep it above the default worker priority on OEMs that throttle
+                // freshly created background threads.
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            }
+        }.also { it.start() }
         backgroundHandler = Handler(backgroundThread!!.looper)
     }
 
@@ -142,6 +157,37 @@ class Camera2PhysicalDualRecorder(
         startBackgroundThread()
 
         try {
+            if (cameraDevice != null) {
+                Log.i(TAG, "♻️ Reusing open CameraDevice for next physical dual segment")
+                CameraDebugLog.append("♻️ Reuse CameraDevice for counter=$counter")
+                prepareOutputs(counter)
+                createDualCaptureSession(onStarted, onError)
+                return
+            }
+
+            // Submit the logical camera open before MediaRecorder/output setup. On some
+            // OEM HALs the first cold open takes seconds; local preparation should overlap
+            // with that wait instead of delaying the request.
+            openCameraDevice(onStarted, onError)
+            prepareOutputs(counter)
+
+            cameraDevice?.let {
+                createDualCaptureSession(onStarted, onError)
+            }
+        } catch (e: Exception) {
+            isOutputPreparationFailed = true
+            val msg = "Camera2PhysicalDualRecorder init failed: ${e.message}"
+            Log.e(TAG, msg, e)
+            CameraDebugLog.append("📸 ❌ $msg")
+            CameraDebugLog.flush()
+            runCatching { cameraDevice?.close() }
+            cameraDevice = null
+            onError(msg)
+        }
+    }
+
+    private fun prepareOutputs(counter: Long) {
+        try {
             // Primary gets audio if enabled, secondary is video-only to prevent microphone collision
             val primary = createMediaRecorder(primaryFolder, primaryPhysicalId, counter, includeAudio = enableAudio)
             val secondary = createMediaRecorder(secondaryFolder, secondaryPhysicalId, counter, includeAudio = false)
@@ -151,25 +197,37 @@ class Camera2PhysicalDualRecorder(
 
             primarySurface = primaryRecorder!!.surface
             secondarySurface = secondaryRecorder!!.surface
+        } catch (error: Exception) {
+            isOutputPreparationFailed = true
+            throw error
+        }
+    }
 
-            if (cameraDevice != null) {
-                Log.i(TAG, "♻️ Reusing open CameraDevice for next physical dual segment")
-                CameraDebugLog.append("♻️ Reuse CameraDevice for counter=$counter")
-                createDualCaptureSession(onStarted, onError)
-                return
-            }
-
+    @SuppressLint("MissingPermission")
+    private fun openCameraDevice(
+        onStarted: () -> Unit,
+        onError: (String) -> Unit,
+    ) {
+        try {
+            onLogicalCameraOpen?.invoke()
             val openStartedAtMs = SystemClock.elapsedRealtime()
+            logOpenRequestPriority()
             cameraManager.openCamera(
                 logicalCameraId,
                 object : CameraDevice.StateCallback() {
                     override fun onOpened(device: CameraDevice) {
-                        cameraDevice = device
                         val openDurationMs = SystemClock.elapsedRealtime() - openStartedAtMs
                         Log.i(TAG, "📸 Camera $logicalCameraId opened for physical dual streaming in ${openDurationMs}ms")
                         CameraDebugLog.append("📸 Camera $logicalCameraId opened in ${openDurationMs}ms")
 
-                        createDualCaptureSession(onStarted, onError)
+                        if (isOutputPreparationFailed) {
+                            device.close()
+                        } else {
+                            cameraDevice = device
+                            if (primarySurface != null && secondarySurface != null) {
+                                createDualCaptureSession(onStarted, onError)
+                            }
+                        }
                     }
 
                     override fun onDisconnected(device: CameraDevice) {
@@ -198,6 +256,16 @@ class Camera2PhysicalDualRecorder(
             CameraDebugLog.flush()
             onError(msg)
         }
+    }
+
+    private fun logOpenRequestPriority() {
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val importance = activityManager?.runningAppProcesses
+            ?.firstOrNull { it.pid == Process.myPid() }?.importance
+        Log.i(
+            TAG,
+            "📸 Submitting logical camera open; pid=${Process.myPid()}, importance=$importance",
+        )
     }
 
     private fun createDualCaptureSession(

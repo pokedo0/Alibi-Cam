@@ -12,16 +12,14 @@ class QuickRecordingShortcutActivity : android.app.Activity() {
             Log.w("QuickRecordingShortcut", "Shortcut entry received an unknown action")
             finish()
         } else {
-            // Stay resumed behind this invisible window until the recorder Service is
-            // ready. OEM camera services often throttle a freshly finished NoDisplay
-            // trampoline even when its foreground Service has already been requested.
-            QuickRecordingStarter.startInBackground(applicationContext, action) { result ->
-                Log.i(
-                    "QuickRecordingShortcut",
-                    "Shortcut entry finished; result=${result.javaClass.simpleName}",
-                )
-                finish()
-            }
+            val result = QuickRecordingStarter.startAndDispatch(applicationContext, action)
+            Log.i(
+                "QuickRecordingShortcut",
+                "Shortcut entry dispatched; result=${result.javaClass.simpleName}",
+            )
+            // Theme.NoDisplay must finish before onResume() completes. The recorder
+            // Service has already received the foreground start request above.
+            finish()
         }
     }
 }

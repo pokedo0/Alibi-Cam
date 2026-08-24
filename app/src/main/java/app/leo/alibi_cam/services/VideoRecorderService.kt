@@ -125,6 +125,14 @@ class VideoRecorderService :
     fun isDualCameraActive(): Boolean = isDualMode
 
     /**
+     * True after the selected camera path has reached its framework open request.
+     * The shortcut entry waits only for this local dispatch, not for HAL readiness.
+     */
+    @Volatile
+    var isCaptureStartRequested = false
+        private set
+
+    /**
      * Some OEM camera HALs defer background openCamera calls until they decide
      * that the caller is still the top app. Expose actual pipeline readiness so
      * the invisible shortcut Activity can stay foreground until capture starts.
@@ -637,6 +645,11 @@ class VideoRecorderService :
         Log.i(TAG, "📸 openCamera: dualRequested=$dualRequested, strategy=${plan.strategy}")
         CameraDebugLog.append("📸 openCamera: dualReq=$dualRequested, plan=${plan.strategy}")
 
+        if (plan.strategy != DualCameraSupport.Strategy.PHYSICAL_CAMERA2) {
+            // The physical dual recorder reports at the exact CameraManager call.
+            isCaptureStartRequested = true
+        }
+
         when (plan.strategy) {
             DualCameraSupport.Strategy.CONCURRENT_CAMERAX -> {
                 isDualMode = true
@@ -706,6 +719,9 @@ class VideoRecorderService :
             secondaryFolder = secondaryBatchesFolder!!,
             enableAudio = enableAudio,
         )
+        physicalDualRecorder!!.onLogicalCameraOpen = {
+            isCaptureStartRequested = true
+        }
 
         physicalDualRecorder!!.start(
             counter = counter,

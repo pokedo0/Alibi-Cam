@@ -76,7 +76,7 @@
             android:exported="true"
             android:noHistory="true"
             android:taskAffinity=""
-            android:theme="@style/Theme.Alibi.QuickRecordingInvisible" />
+            android:theme="@android:style/Theme.NoDisplay" />
         <receiver
             android:name=".receivers.LocalChangeReceiver"
             android:exported="false">

@@ -23,6 +23,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+
 enum class QuickRecordingAction {
     AUDIO,
     VIDEO;
@@ -64,6 +68,7 @@ sealed class RecorderServiceInspection {
 object QuickRecordingStarter {
     private const val TAG = "QuickRecordingStarter"
     private const val START_CONFIRMATION_TIMEOUT_MS = 10_000L
+    private const val START_DISPATCH_WAIT_TIMEOUT_MS = 500L
     private val requestMutex = Mutex()
     private val entryPointScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -91,6 +96,7 @@ object QuickRecordingStarter {
             return QuickRecordingResult.Failed(QuickRecordingFailureReason.SERVICE)
         }
 
+        var waitOnConfirmation = false
         return try {
             runBlocking {
                 try {
@@ -112,12 +118,36 @@ object QuickRecordingStarter {
                     )
 
                     if (result is QuickRecordingResult.Started) {
+                        if (action == QuickRecordingAction.VIDEO) {
+                            val dispatchStartedAtMs = SystemClock.elapsedRealtime()
+                            val dispatched = pumpMainThreadUntil(
+                                START_DISPATCH_WAIT_TIMEOUT_MS,
+                            ) {
+                                RecorderService.activeService(target.serviceClass)
+                                    ?.let(target::isStartRequestDispatched) == true
+                            }
+
+                            Log.i(
+                                TAG,
+                                "Shortcut camera dispatch ${if (dispatched) "confirmed" else "timed out"} " +
+                                    "before NoDisplay exit in " +
+                                    "${SystemClock.elapsedRealtime() - dispatchStartedAtMs}ms",
+                            )
+                        }
+
+                        waitOnConfirmation = true
                         entryPointScope.launch {
-                            if (!confirmStarted(appContext, target)) {
-                                Log.e(
-                                    TAG,
-                                    "Recorder pipeline did not become ready after $action start request",
-                                )
+                            try {
+                                if (!confirmStarted(appContext, target)) {
+                                    Log.e(
+                                        TAG,
+                                        "Recorder pipeline did not become ready after $action start request",
+                                    )
+                                }
+                            } finally {
+                                // Keep duplicate requests out until the first capture
+                                // pipeline has either become ready or failed to appear.
+                                requestMutex.unlock()
                             }
                         }
                     }
@@ -129,7 +159,9 @@ object QuickRecordingStarter {
                 }
             }
         } finally {
-            requestMutex.unlock()
+            if (!waitOnConfirmation) {
+                requestMutex.unlock()
+            }
         }
     }
 
@@ -257,6 +289,50 @@ object QuickRecordingStarter {
         }
     }
 
+    /**
+     * Let queued Service lifecycle messages run while the invisible shortcut
+     * Activity is still launching. Some OEM HALs inspect process visibility when
+     * the first CameraManager.openCamera binder call arrives; waiting for that
+     * submission (not camera readiness) keeps it out of the finished-trampoline gap.
+     */
+    private fun pumpMainThreadUntil(
+        timeoutMs: Long,
+        condition: () -> Boolean,
+    ): Boolean {
+        val looper = Looper.myLooper() ?: return condition()
+        if (condition()) return true
+
+        val handler = Handler(looper)
+        val deadlineMs = SystemClock.elapsedRealtime() + timeoutMs
+        // Never quit the process-main Looper: it would also unwind Android's outer
+        // loop. A private throwable unwinds only this nested pump.
+        val pumpExit = StartDispatchPumpExit()
+        val checker = object : Runnable {
+            override fun run() {
+                if (condition() || SystemClock.elapsedRealtime() >= deadlineMs) {
+                    throw pumpExit
+                } else {
+                    handler.postDelayed(this, 5)
+                }
+            }
+        }
+
+        handler.postDelayed(checker, 1)
+        try {
+            Looper.loop()
+        } catch (error: StartDispatchPumpExit) {
+            if (error !== pumpExit) throw error
+        } finally {
+            handler.removeCallbacks(checker)
+        }
+
+        return condition()
+    }
+
+    private class StartDispatchPumpExit : RuntimeException() {
+        override fun fillInStackTrace(): Throwable = this
+    }
+
     private suspend fun confirmStarted(
         context: Context,
         target: QuickRecordingTarget,
@@ -313,6 +389,7 @@ private interface QuickRecordingTarget {
     val serviceClass: Class<out RecorderService>
 
     fun isPipelineReady(service: RecorderService): Boolean
+    fun isStartRequestDispatched(service: RecorderService): Boolean
 
     fun requiredPermissions(context: Context, settings: AppSettings): List<String>
     fun start(context: Context, settings: AppSettings)
@@ -323,6 +400,9 @@ private object AudioTarget : QuickRecordingTarget {
 
     override fun isPipelineReady(service: RecorderService): Boolean =
         service.state == RecorderState.RECORDING || service.state == RecorderState.PAUSED
+
+    override fun isStartRequestDispatched(service: RecorderService): Boolean =
+        isPipelineReady(service)
 
     override fun requiredPermissions(context: Context, settings: AppSettings): List<String> {
         if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE)) {
@@ -350,6 +430,10 @@ private object VideoTarget : QuickRecordingTarget {
 
     override fun isPipelineReady(service: RecorderService): Boolean =
         service is VideoRecorderService && service.isCapturePipelineReady
+
+    override fun isStartRequestDispatched(service: RecorderService): Boolean =
+        service is VideoRecorderService &&
+            (service.isCaptureStartRequested || service.isCapturePipelineReady)
 
     override fun requiredPermissions(context: Context, settings: AppSettings): List<String> {
         val packageManager = context.packageManager
