@@ -2,11 +2,5 @@
   "versionCode": 17,
   "versionName": "v0.6.0",
   "message": "Alibi-Leo 魔改版 —— 基于开源 Alibi v0.5.3，专为两轮车行车记录仪优化\n\n相比原版改动：\n• 增加超广角镜头选项\n• 增加录制比例 4:3 选项\n• 增加 NFC 启动模式\n• 增加打开 App 自动录制选项\n• 增加手机姿态感知停止录像模式（含灵敏度调节）\n• 增加启动自动检查更新 + 手动检查更新\n• 增加永久删除录像选项（不经过回收站）\n• 修改最大时长和片段时长的存储逻辑\n• 默认录制参数优化：FHD 1600×1200 / 4:3 / 2Mbps / 24fps（省电约 20%）\n• 修复自动停止时 FFmpeg 崩溃导致视频丢失",
-  "downloadUrl": "https://gitee.com/zhanglinleo1-maker/Alibi-Cam/releases/download/v0.6.0/Alibi-Cam%20app-release.apk",
-  "ad": {
-    "enabled": false,
-    "version": 1,
-    "imageUrl": "https://gitee.com/zhanglinleo1-maker/Alibi-Cam/raw/master/ad_banner.png",
-    "clickUrl": "https://example.com/promo"
-  }
+  "downloadUrl": "https://gitee.com/zhanglinleo1-maker/Alibi-Cam/releases/download/v0.6.0/Alibi-Cam%20app-release.apk"
 }

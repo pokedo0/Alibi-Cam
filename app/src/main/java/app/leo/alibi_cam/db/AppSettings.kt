@@ -49,24 +49,11 @@ data class AppSettings(
     val autoStopSensitivity: String = "standard",
     // Only trigger auto-stop when the screen is off (double confirmation)，默认关闭
     val autoStopRequireScreenOff: Boolean = false,
-    // 设备首次安装唯一标识（用于统计安装量）
-    val installId: String? = null,
     // ── 更新检查 ──
     // 用户已忽略的更新版本号；为 0 表示从未忽略过任何版本
     val dismissedUpdateVersionCode: Int = 0,
     // 上次检查更新的时间戳（毫秒），用于每天最多检查一次
     val lastUpdateCheckTime: Long = 0,
-    // ── 广告配置（远程开关）──
-    // 是否展示广告（由 update.json 远程控制，默认 false）
-    val adEnabled: Boolean = false,
-    // 用户已关闭的广告版本号；为 0 表示从未关闭过；>= 当前广告版本则不再显示
-    val adDismissedVersion: Int = 0,
-    // 广告图片 URL（从远程配置同步）
-    val adImageUrl: String = "",
-    // 广告点击跳转 URL（从远程配置同步）
-    val adClickUrl: String = "",
-    // 当前远程广告版本号
-    val adVersion: Int = 0,
     // ── 永久删除视频文件（不进系统回收站）──
     // 默认 false，保持 Android 原生行为（部分厂商会拦截删除进回收站）
     // 开启后直接物理删除，立刻释放存储空间，适合长时间录制用户（如外卖配送）
@@ -152,10 +139,6 @@ data class AppSettings(
         return copy(autoStopRequireScreenOff = require)
     }
 
-    fun setInstallId(id: String): AppSettings {
-        return copy(installId = id)
-    }
-
     fun setDismissedUpdateVersionCode(code: Int): AppSettings {
         return copy(dismissedUpdateVersionCode = code)
     }
@@ -164,23 +147,6 @@ data class AppSettings(
         return copy(lastUpdateCheckTime = time)
     }
 
-    fun setAdConfig(
-        enabled: Boolean,
-        version: Int,
-        imageUrl: String,
-        clickUrl: String,
-    ): AppSettings {
-        return copy(
-            adEnabled = enabled,
-            adVersion = version,
-            adImageUrl = imageUrl,
-            adClickUrl = clickUrl,
-        )
-    }
-
-    fun setAdDismissedVersion(version: Int): AppSettings {
-        return copy(adDismissedVersion = version)
-    }
 
     fun setPermanentlyDeleteRecordings(enabled: Boolean): AppSettings {
         return copy(permanentlyDeleteRecordings = enabled)

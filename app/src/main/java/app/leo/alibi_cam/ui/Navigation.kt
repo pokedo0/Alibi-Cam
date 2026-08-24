@@ -100,18 +100,6 @@ fun Navigation(
         }
     }
 
-    // ── 首次安装遥测上报 ──
-    LaunchedEffect(settings) {
-        if (settings.installId == null) {
-            val newId = java.util.UUID.randomUUID().toString().take(8)
-            dataStore.updateData { it.setInstallId(newId) }
-            app.leo.alibi_cam.helpers.TelemetryHelper.reportNewInstall(
-                appVersion = app.leo.alibi_cam.BuildConfig.VERSION_NAME,
-                installId = newId,
-            )
-        }
-    }
-
     // ── 自动检查更新（每天最多一次）──
     val scope = rememberCoroutineScope()
     var autoUpdateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
@@ -129,12 +117,6 @@ fun Navigation(
         val info = UpdateHelper.checkForUpdate(BuildConfig.VERSION_CODE)
         if (info != null && settings.dismissedUpdateVersionCode < info.versionCode) {
             autoUpdateInfo = info
-        }
-
-        // 广告配置同步
-        val adConfig = UpdateHelper.fetchAdConfig()
-        dataStore.updateData {
-            it.setAdConfig(adConfig.enabled, adConfig.version, adConfig.imageUrl, adConfig.clickUrl)
         }
     }
 

@@ -56,13 +56,6 @@ fun ResponsibilityPage(
             Text(
                 stringResource(R.string.ui_welcome_responsibility_message),
             )
-            Spacer(modifier = Modifier.height(24.dp))
-            // 隐私说明
-            Text(
-                stringResource(R.string.ui_welcome_privacy_notice),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
         Spacer(modifier = Modifier.weight(1f))
         Button(

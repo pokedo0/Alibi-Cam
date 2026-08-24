@@ -45,7 +45,6 @@ import app.leo.alibi_cam.R
 import app.leo.alibi_cam.db.AppSettings
 import app.leo.alibi_cam.ui.BIG_PRIMARY_BUTTON_MAX_WIDTH
 import app.leo.alibi_cam.ui.BIG_PRIMARY_BUTTON_SIZE
-import app.leo.alibi_cam.ui.components.RecorderScreen.atoms.BannerAd
 import app.leo.alibi_cam.ui.components.RecorderScreen.atoms.LowStorageInfo
 import app.leo.alibi_cam.ui.components.RecorderScreen.molecules.AudioRecordingStart
 import app.leo.alibi_cam.ui.components.RecorderScreen.molecules.QuickMaxDurationSelector
@@ -68,7 +67,6 @@ fun StartRecording(
     onHideTopBar: () -> Unit,
     onShowTopBar: () -> Unit,
     showAudioRecorder: Boolean,
-    onDismissAd: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val orientation = LocalConfiguration.current.orientation
@@ -137,18 +135,6 @@ fun StartRecording(
                 }
 
                 else -> {
-                    // ── 广告占位区（默认不显示，远程开关控制）──
-                    val showAd = appSettings.adEnabled
-                        && appSettings.adDismissedVersion < appSettings.adVersion
-                        && appSettings.adImageUrl.isNotEmpty()
-
-                    if (showAd) {
-                        BannerAd(
-                            imageUrl = appSettings.adImageUrl,
-                            clickUrl = appSettings.adClickUrl,
-                            onDismiss = onDismissAd,
-                        )
-                    }
                     Spacer(modifier = Modifier.weight(1f))
 
                     if (showAudioRecorder)

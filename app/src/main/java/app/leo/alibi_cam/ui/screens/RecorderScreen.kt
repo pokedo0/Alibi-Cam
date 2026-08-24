@@ -131,13 +131,6 @@ fun RecorderScreen(
                     onShowTopBar = {
                         topBarVisible = true
                     },
-                    onDismissAd = {
-                        scope.launch {
-                            dataStore.updateData {
-                                it.setAdDismissedVersion(settings.adVersion)
-                            }
-                        }
-                    },
                 )
         }
     }

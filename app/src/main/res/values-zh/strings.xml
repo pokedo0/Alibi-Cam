@@ -45,7 +45,6 @@
     <string name="ui_welcome_explanation_message">Alibi就像你手机上的行车记录仪一样。它会持续进行录制，并按您的要求保存最近30分钟的录制文件。</string>
     <string name="ui_welcome_responsibility_title">您需要自行承担使用该应用程序所带来的风险和后果。</string>
     <string name="ui_welcome_responsibility_message">Alibi不对该应用程序的使用负任何责任。您在使用时需自行承担使用风险。</string>
-    <string name="ui_welcome_privacy_notice">隐私说明：首次启动时，本应用会通过飞书机器人向开发者发送匿名的设备信息（设备型号、Android版本、应用版本、匿名标识符），仅用于统计安装数量。不会收集任何个人信息、位置信息或使用行为数据。如有疑问请联系开发者。</string>
     <string name="ui_welcome_start_label">开始使用 Alibi</string>
     <string name="ui_settings_title">设置</string>
     <string name="ui_settings_advancedSettings_label">高级设置</string>
