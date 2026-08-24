@@ -1,12 +1,14 @@
 package app.leo.alibi_cam.helpers
 
 import android.content.ContentValues
+import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.documentfile.provider.DocumentFile
 import app.leo.alibi_cam.helpers.MediaConverter.Companion.concatenateAudioFiles
@@ -195,6 +197,114 @@ class AudioBatchesFolder(
         }
     }
 
+    fun listChunkNames(): List<String> {
+        fun sorted(names: List<String>) = names.sortedWith(
+            compareBy { name ->
+                name.substringAfterLast('/').substringBeforeLast('.').toLongOrNull()
+                    ?: Long.MAX_VALUE
+            }
+        )
+
+        return when (type) {
+            BatchType.INTERNAL -> {
+                val searchDir = if (taskFolderName != null) {
+                    File(getInternalFolder(), taskFolderName!!)
+                } else {
+                    getInternalFolder()
+                }
+                searchDir.listFiles()
+                    ?.filter { it.isFile && it.nameWithoutExtension.toLongOrNull() != null }
+                    ?.map { it.name }
+                    ?.let(::sorted)
+                    ?: emptyList()
+            }
+
+            BatchType.CUSTOM -> getCustomDefinedFolder().listFiles()
+                .filter { it.isFile && it.name?.substringBeforeLast('.')?.toLongOrNull() != null }
+                .map { it.name!! }
+                .let(::sorted)
+
+            BatchType.MEDIA -> {
+                val names = mutableListOf<String>()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    context.contentResolver.query(
+                        scopedMediaContentUri,
+                        arrayOf(MediaStore.Audio.Media.DISPLAY_NAME),
+                        "${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?",
+                        arrayOf("$mediaPrefix%"),
+                        null,
+                    )?.use { cursor ->
+                        while (cursor.moveToNext()) {
+                            cursor.getString(0)?.let(names::add)
+                        }
+                    }
+                } else {
+                    legacyMediaFolder.listFiles()?.forEach { file ->
+                        file.name?.let(names::add)
+                    }
+                }
+                sorted(names)
+            }
+        }
+    }
+
+    private fun deleteFlatChunk(name: String): Boolean {
+        return when (type) {
+            BatchType.INTERNAL -> File(getInternalFolder(), name).delete()
+
+            BatchType.CUSTOM -> {
+                getCustomDefinedFolder().findFile(name)?.delete() ?: false
+            }
+
+            BatchType.MEDIA -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    var deleted = false
+                    context.contentResolver.query(
+                        scopedMediaContentUri,
+                        arrayOf(
+                            MediaStore.Audio.Media._ID,
+                            MediaStore.Audio.Media.RELATIVE_PATH,
+                            MediaStore.Audio.Media.DISPLAY_NAME,
+                        ),
+                        "${MediaStore.Audio.Media.DISPLAY_NAME} = ?",
+                        arrayOf(name),
+                        null,
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val id = cursor.getLong(0)
+                            val uri = ContentUris.withAppendedId(scopedMediaContentUri, id)
+
+                            if (permanentlyDeleteRecordings) {
+                                val relativePath = cursor.getString(1) ?: ""
+                                val physicalFile = File(
+                                    Environment.getExternalStorageDirectory(),
+                                    "$relativePath$name",
+                                )
+                                runCatching { physicalFile.delete() }
+                            }
+
+                            deleted = context.contentResolver.delete(uri, null, null) > 0
+                        }
+                    }
+                    deleted
+                } else {
+                    File(legacyMediaFolder, name).delete()
+                }
+            }
+        }
+    }
+
+    fun deleteFlatChunks(names: Iterable<String>): Int {
+        var deleted = 0
+        names.distinct().forEach { name ->
+            if (deleteFlatChunk(name)) {
+                deleted++
+            }
+        }
+        Log.i(TAG, "Deleted flat audio chunks requested=${names.count()} deleted=$deleted")
+        return deleted
+    }
+
     fun asCustomGetFileDescriptor(
         counter: Long,
         fileExtension: String,
@@ -258,6 +368,7 @@ class AudioBatchesFolder(
         // Don't use those values directly, use the constants from the instance.
         // Those values are only used inside the `SaveFolderTile`
         val SCOPED_MEDIA_CONTENT_URI = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        private const val TAG = "AudioBatchesFolder"
         val LEGACY_MEDIA_FOLDER = File(
             Environment.getExternalStoragePublicDirectory(BASE_LEGACY_STORAGE_FOLDER),
             MEDIA_RECORDINGS_SUBFOLDER,

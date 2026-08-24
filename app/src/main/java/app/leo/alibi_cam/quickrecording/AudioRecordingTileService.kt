@@ -19,13 +19,7 @@ class AudioRecordingTileService : TileService() {
     override fun onClick() {
         super.onClick()
 
-        setTileState(Tile.STATE_ACTIVE)
-        QuickRecordingStarter.startInBackground(
-            applicationContext,
-            QuickRecordingAction.AUDIO,
-        ) { result ->
-            setTileState(result.toTileState())
-        }
+        startThroughShortcutActivity(QuickRecordingAction.AUDIO)
     }
 
     private fun updateTileFromCurrentState(inspection: RecorderServiceInspection) {
@@ -38,6 +32,18 @@ class AudioRecordingTileService : TileService() {
         getQsTile()?.let { tile ->
             tile.state = state
             tile.updateTile()
+        }
+    }
+
+    private fun startThroughShortcutActivity(action: QuickRecordingAction) {
+        setTileState(Tile.STATE_INACTIVE)
+        QuickRecordingEntryCallbacks.register(action) { result ->
+            setTileState(result.toTileState())
+        }
+
+        if (!launchNoDisplayEntry(action)) {
+            QuickRecordingEntryCallbacks.unregister(action)
+            setTileState(Tile.STATE_UNAVAILABLE)
         }
     }
 }

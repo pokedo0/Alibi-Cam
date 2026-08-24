@@ -19,13 +19,7 @@ class VideoRecordingTileService : TileService() {
     override fun onClick() {
         super.onClick()
 
-        setTileState(Tile.STATE_ACTIVE)
-        QuickRecordingStarter.startInBackground(
-            applicationContext,
-            QuickRecordingAction.VIDEO,
-        ) { result ->
-            setTileState(result.toTileState())
-        }
+        startThroughShortcutActivity(QuickRecordingAction.VIDEO)
     }
 
     private fun updateTileFromCurrentState(inspection: RecorderServiceInspection) {
@@ -38,6 +32,18 @@ class VideoRecordingTileService : TileService() {
         getQsTile()?.let { tile ->
             tile.state = state
             tile.updateTile()
+        }
+    }
+
+    private fun startThroughShortcutActivity(action: QuickRecordingAction) {
+        setTileState(Tile.STATE_INACTIVE)
+        QuickRecordingEntryCallbacks.register(action) { result ->
+            setTileState(result.toTileState())
+        }
+
+        if (!launchNoDisplayEntry(action)) {
+            QuickRecordingEntryCallbacks.unregister(action)
+            setTileState(Tile.STATE_UNAVAILABLE)
         }
     }
 }

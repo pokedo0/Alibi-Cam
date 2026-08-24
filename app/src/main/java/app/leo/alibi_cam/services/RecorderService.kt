@@ -83,7 +83,16 @@ abstract class RecorderService : LifecycleService() {
     fun startRecording() {
         recordingStart = LocalDateTime.now()
 
-        startForegroundService()
+        try {
+            startForegroundService()
+        } catch (error: RuntimeException) {
+            Log.e(TAG, "Failed to promote ${javaClass.simpleName} to foreground", error)
+            state = RecorderState.STOPPED
+            onError()
+            destroy()
+            return
+        }
+
         changeState(RecorderState.RECORDING)
 
         try {
@@ -152,6 +161,8 @@ abstract class RecorderService : LifecycleService() {
                     startForegroundService()
                 } catch (error: Exception) {
                     Log.e(TAG, "Early foreground promotion failed", error)
+                    state = RecorderState.STOPPED
+                    destroy()
                 }
             }
 

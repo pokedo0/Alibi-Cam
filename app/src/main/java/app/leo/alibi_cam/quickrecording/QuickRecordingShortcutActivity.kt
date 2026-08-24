@@ -17,6 +17,7 @@ class QuickRecordingShortcutActivity : android.app.Activity() {
                 "QuickRecordingShortcut",
                 "Shortcut entry dispatched; result=${result.javaClass.simpleName}",
             )
+            QuickRecordingEntryCallbacks.dispatch(action, result)
             // Theme.NoDisplay must finish before onResume() completes. The recorder
             // Service has already received the foreground start request above.
             finish()

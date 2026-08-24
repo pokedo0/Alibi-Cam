@@ -317,16 +317,55 @@ fun RecorderEventsHandler(
                                         settings.deleteRecordingsImmediately,
                                 )
                             }
+                    }
+					} else {
+                        val audioFolder = batchesFolder as? AudioBatchesFolder
+                            ?: throw Exception("Audio recorder has non-audio batches folder")
+                        val sourceChunkNames = audioFolder.listChunkNames()
+                        if (sourceChunkNames.isEmpty()) {
+                            throw Exception("Primary audio stream has no source chunks")
                         }
-                    } else {
-                        batchesFolder.concatenate(
-                            recording,
-                            filenameFormat = settings.filenameFormat,
-                            fileName = fileName,
-                            onProgress = { percentage ->
-                                processingProgress = percentage
-                            }
+
+                        Log.i(
+                            "RecorderEventsHandler",
+                            "🎧 Merge audio type=${audioFolder.type} chunks=${sourceChunkNames.size} " +
+                                "output=$fileName",
                         )
+
+                        try {
+                            batchesFolder.concatenate(
+                                recording,
+                                filenameFormat = settings.filenameFormat,
+                                fileName = fileName,
+                                onProgress = { percentage ->
+                                    processingProgress = percentage
+                                }
+                            )
+                        } catch (error: Exception) {
+                            Log.e(
+                                "RecorderEventsHandler",
+                                "🎧 Merge failed; source chunks preserved count=${sourceChunkNames.size}",
+                                error,
+                            )
+                            throw error
+                        }
+
+                        if (settings.deleteRecordingsImmediately) {
+                            audioFolder.permanentlyDeleteRecordings =
+                                settings.permanentlyDeleteRecordings
+                            val deleted = audioFolder.deleteFlatChunks(sourceChunkNames)
+                            Log.i(
+                                "RecorderEventsHandler",
+                                "🧹 Deleted merged source audio chunks deleted=$deleted/" +
+                                    "${sourceChunkNames.size}",
+                            )
+                        } else {
+                            Log.i(
+                                "RecorderEventsHandler",
+                                "🧹 Preserved merged source audio chunks count=${sourceChunkNames.size} " +
+                                    "immediateDelete=false",
+                            )
+                        }
                     }
 
                     // Save file

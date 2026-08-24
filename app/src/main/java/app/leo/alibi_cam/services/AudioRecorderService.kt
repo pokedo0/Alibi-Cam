@@ -7,16 +7,23 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.MediaRecorder
 import android.media.MediaRecorder.OnErrorListener
+import android.util.Log
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.app.ServiceCompat
+import androidx.lifecycle.lifecycleScope
 import app.leo.alibi_cam.NotificationHelper
+import app.leo.alibi_cam.dataStore
 import app.leo.alibi_cam.db.RecordingInformation
 import app.leo.alibi_cam.enums.RecorderState
 import app.leo.alibi_cam.helpers.AudioBatchesFolder
 import app.leo.alibi_cam.helpers.BatchesFolder
+import app.leo.alibi_cam.ui.RECORDER_INTERNAL_SELECTED_VALUE
 import app.leo.alibi_cam.ui.utils.MicrophoneInfo
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class AudioRecorderService :
     IntervalRecorderService<RecordingInformation, AudioBatchesFolder>() {
@@ -80,6 +87,35 @@ class AudioRecorderService :
     override fun resume() {
         super.resume()
         createAmplitudesTimer()
+    }
+
+    override fun handleStopFromNotification() {
+        lifecycleScope.launch {
+            try {
+                Log.i(TAG, "Notification stop requested; finalizing audio recording")
+                stopRecording()
+
+                val info = getRecordingInformation()
+                dataStore.updateData { it.setLastRecording(info) }
+                Log.i(
+                    TAG,
+                    "Persisted audio recording metadata; batches=${info.batchesAmount} " +
+                        "folder=${info.folderPath}",
+                )
+
+                val fullyMerged = mergeInBackground(info)
+                if (fullyMerged && info.folderPath != RECORDER_INTERNAL_SELECTED_VALUE) {
+                    dataStore.updateData { it.setLastRecording(null) }
+                    Log.i(TAG, "Audio notification merge completed; recovery metadata cleared")
+                } else if (fullyMerged) {
+                    Log.i(TAG, "Audio notification merge completed; internal output retained")
+                }
+            } catch (error: Exception) {
+                Log.e(TAG, "Audio notification stop/save failed", error)
+            } finally {
+                destroy()
+            }
+        }
     }
 
     override fun startForegroundService() {
@@ -312,4 +348,56 @@ class AudioRecorderService :
             intervalDuration = settings.intervalDuration,
             type = RecordingInformation.Type.AUDIO,
         )
+
+    private suspend fun mergeInBackground(info: RecordingInformation): Boolean {
+        return withContext(Dispatchers.IO) {
+            val folder = AudioBatchesFolder.importFromFolder(info.folderPath, this@AudioRecorderService)
+            val sourceChunks = folder.getBatchesForFFmpeg()
+
+            if (sourceChunks.isEmpty()) {
+                Log.e(TAG, "No audio chunks available for notification merge")
+                return@withContext false
+            }
+
+            val outputName = folder.getName(info.recordingStart, info.fileExtension)
+            Log.i(
+                TAG,
+                "Merging audio notification recording; chunks=${sourceChunks.size} " +
+                    "type=${folder.type} output=$outputName",
+            )
+
+            try {
+                val output = folder.concatenate(
+                    info,
+                    filenameFormat = settings.filenameFormat,
+                    fileName = outputName,
+                )
+                Log.i(TAG, "Merged audio notification recording output=$output")
+            } catch (error: Exception) {
+                Log.e(
+                    TAG,
+                    "Audio notification merge failed; source chunks preserved count=${sourceChunks.size}",
+                    error,
+                )
+                return@withContext false
+            }
+
+            if (!settings.deleteRecordingsImmediately) {
+                Log.i(
+                    TAG,
+                    "Preserved merged audio source chunks; immediateDelete=false count=${sourceChunks.size}",
+                )
+                return@withContext true
+            }
+
+            folder.permanentlyDeleteRecordings = settings.permanentlyDeleteRecordings
+            val deleted = folder.deleteRecordings(0..counter)
+            Log.i(TAG, "Deleted merged audio source chunks deleted=$deleted/${sourceChunks.size}")
+            true
+        }
+    }
+
+    companion object {
+        private const val TAG = "AudioRecorderService"
+    }
 }
