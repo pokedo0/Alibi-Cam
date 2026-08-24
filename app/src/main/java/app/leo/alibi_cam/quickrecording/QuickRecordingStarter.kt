@@ -68,7 +68,7 @@ sealed class RecorderServiceInspection {
 object QuickRecordingStarter {
     private const val TAG = "QuickRecordingStarter"
     private const val START_CONFIRMATION_TIMEOUT_MS = 10_000L
-    private const val START_DISPATCH_WAIT_TIMEOUT_MS = 500L
+    private const val START_DISPATCH_WAIT_TIMEOUT_MS = 1_500L
     private val requestMutex = Mutex()
     private val entryPointScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 

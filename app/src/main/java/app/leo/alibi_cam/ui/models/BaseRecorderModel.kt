@@ -149,7 +149,22 @@ abstract class BaseRecorderModel<I, B : BatchesFolder, T : IntervalRecorderServi
             onBatchesFolderNotAccessible()
         }
 
-        if (batchesFolder != null) {
+        val serviceIsActive =
+            recorder.state == RecorderState.RECORDING || recorder.state == RecorderState.PAUSED
+
+        if (serviceIsActive && recorder.batchesFolder != null) {
+            // A shortcut-started service can still be recording when the UI model
+            // reconnects. The capture pipeline owns the folder at that point.
+            if (batchesFolder !== recorder.batchesFolder) {
+                Log.i(
+                    TAG,
+                    "Adopting authoritative batches folder from active " +
+                        "${intentClass.simpleName}; model=${System.identityHashCode(batchesFolder)}, " +
+                        "service=${System.identityHashCode(recorder.batchesFolder)}",
+                )
+            }
+            batchesFolder = recorder.batchesFolder
+        } else if (batchesFolder != null) {
             recorder.batchesFolder = batchesFolder!!
         } else {
             batchesFolder = recorder.batchesFolder
@@ -167,7 +182,13 @@ abstract class BaseRecorderModel<I, B : BatchesFolder, T : IntervalRecorderServi
             false
         }
 
-        if (settings != null) {
+        if (serviceIsActive && serviceSettingsInitialized) {
+            // Keep settings and the captured chunks on the same recording session.
+            if (settings !== recorder.settings) {
+                Log.i(TAG, "Adopting authoritative settings from active ${intentClass.simpleName}")
+            }
+            settings = recorder.settings
+        } else if (settings != null) {
             // If `settings` is set, it means we started the recording, so it should be
             // properly set on the service
             recorder.settings = settings!!

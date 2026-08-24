@@ -75,6 +75,25 @@ class VideoRecorderService :
     IntervalRecorderService<RecordingInformation, VideoBatchesFolder>() {
     override var batchesFolder = VideoBatchesFolder.viaInternalFolder(this)
 
+    /**
+     * Session created by [start] and used by the actual capture pipeline.
+     * Folder objects can be replaced while a shortcut-started Service is being
+     * rebound to the UI; export must never fall back to a stale session id.
+     */
+    private var activeRecordingSessionId: String? = null
+
+    @Volatile
+    private var activePrimaryBatchesFolder: VideoBatchesFolder? = null
+
+    @Volatile
+    private var activeSecondaryBatchesFolder: VideoBatchesFolder? = null
+
+    private val primaryCaptureFolder: VideoBatchesFolder
+        get() = activePrimaryBatchesFolder ?: batchesFolder
+
+    private val secondaryCaptureFolder: VideoBatchesFolder?
+        get() = activeSecondaryBatchesFolder ?: secondaryBatchesFolder
+
     // Secondary batches folder for dual-camera output (null in single-camera mode)
     var secondaryBatchesFolder: VideoBatchesFolder? = null
 
@@ -218,9 +237,15 @@ class VideoRecorderService :
         val sessionId = LocalDateTime.now().format(
             DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
         )
-        batchesFolder.sessionId = sessionId
-        secondaryBatchesFolder?.sessionId = sessionId
-        Log.i(TAG, "📁 Session: $sessionId (flat storage)")
+        activeRecordingSessionId = sessionId
+        activePrimaryBatchesFolder = batchesFolder.also { it.sessionId = sessionId }
+        activeSecondaryBatchesFolder = secondaryBatchesFolder?.also { it.sessionId = sessionId }
+        Log.i(
+            TAG,
+            "📁 Session: $sessionId (flat storage), " +
+                "primary=${System.identityHashCode(activePrimaryBatchesFolder)}, " +
+                "secondary=${activeSecondaryBatchesFolder?.let { System.identityHashCode(it) } ?: "none"}",
+        )
         CameraDebugLog.append("📁 Session: $sessionId (flat)")
 
         acquireRecordingWakeLock()
@@ -238,6 +263,11 @@ class VideoRecorderService :
     override suspend fun stop() {
         try {
             stopOrientationMonitoring()
+            activeRecordingSessionId?.let { sessionId ->
+                Log.i(TAG, "💾 Restoring authoritative recording session before export: $sessionId")
+                primaryCaptureFolder.sessionId = sessionId
+                secondaryCaptureFolder?.sessionId = sessionId
+            }
             super.stop()
 
             stopActiveRecording()
@@ -342,13 +372,15 @@ class VideoRecorderService :
                     // Camera2 session to be ready before pruning old chunks or
                     // allowing the next interval to overlap this rotation.
                     runBlocking(Dispatchers.IO) {
-                        physicalDualRecorder?.rotateNextChunk(counter)
+                        physicalDualRecorder?.rotateNextChunk(counter) {
+                            startRecordingTimeTimerIfNeeded()
+                        }
                     }
                 } else {
                     stopActiveRecording()
-                    startCycleForStream(primary, batchesFolder)
+                    startCycleForStream(primary, primaryCaptureFolder)
                     secondary?.let { stream ->
-                        secondaryBatchesFolder?.let { folder ->
+                        secondaryCaptureFolder?.let { folder ->
                             startCycleForStream(stream, folder)
                         }
                     }
@@ -504,7 +536,7 @@ class VideoRecorderService :
     override fun deleteOldRecordings() {
         try {
             // 同步永久删除标志（基类 deleteOldRecordings() 也做了，但本覆写不走 super）
-            batchesFolder.permanentlyDeleteRecordings = settings.permanentlyDeleteRecordings
+            primaryCaptureFolder.permanentlyDeleteRecordings = settings.permanentlyDeleteRecordings
 
             val maxDurationMs = settings.maxDuration // 已是毫秒
 
@@ -513,7 +545,7 @@ class VideoRecorderService :
 
             if (maxDurationMs <= 0) return
 
-            val chunks = batchesFolder.listFlatChunksWithDuration()
+            val chunks = primaryCaptureFolder.listFlatChunksWithDuration()
             var totalMs = chunks.sumOf { it.second }
 
             Log.i(TAG, "🧹 ${chunks.size} chunks, totalMs=$totalMs")
@@ -524,7 +556,7 @@ class VideoRecorderService :
             var deleted = 0
             for ((name, durationMs) in chunks) {
                 if (totalMs <= maxDurationMs) break
-                val ok = batchesFolder.deleteFlatChunk(name)
+                val ok = primaryCaptureFolder.deleteFlatChunk(name)
                 if (ok) {
                     totalMs -= durationMs
                     deleted++
@@ -537,7 +569,7 @@ class VideoRecorderService :
             CameraDebugLog.append("🧹 Duration pruning: deleted $deleted chunks, final=$totalMs ms")
             CameraDebugLog.flush()
             // Also prune secondary batches folder in dual-camera mode
-            secondaryBatchesFolder?.let { secFolder ->
+            secondaryCaptureFolder?.let { secFolder ->
                 secFolder.permanentlyDeleteRecordings = settings.permanentlyDeleteRecordings
                 val secChunks = secFolder.listFlatChunksWithDuration()
                 var secTotalMs = secChunks.sumOf { it.second }
@@ -645,11 +677,6 @@ class VideoRecorderService :
         Log.i(TAG, "📸 openCamera: dualRequested=$dualRequested, strategy=${plan.strategy}")
         CameraDebugLog.append("📸 openCamera: dualReq=$dualRequested, plan=${plan.strategy}")
 
-        if (plan.strategy != DualCameraSupport.Strategy.PHYSICAL_CAMERA2) {
-            // The physical dual recorder reports at the exact CameraManager call.
-            isCaptureStartRequested = true
-        }
-
         when (plan.strategy) {
             DualCameraSupport.Strategy.CONCURRENT_CAMERAX -> {
                 isDualMode = true
@@ -705,9 +732,10 @@ class VideoRecorderService :
         // Keep both streams in the user's selected storage type. The position
         // suffix isolates secondary chunks and merged output from the primary.
         secondaryBatchesFolder = createSecondaryBatchesFolder(secondaryPosition).also {
-            it.sessionId = batchesFolder.sessionId
+            it.sessionId = primaryCaptureFolder.sessionId
             it.initFolders()
         }
+        activeSecondaryBatchesFolder = secondaryBatchesFolder
 
         physicalDualRecorder = Camera2PhysicalDualRecorder(
             context = this,
@@ -715,7 +743,7 @@ class VideoRecorderService :
             logicalCameraId = pair.logicalCameraId,
             primaryPhysicalId = pair.primaryPhysicalId,
             secondaryPhysicalId = pair.secondaryPhysicalId,
-            primaryFolder = batchesFolder,
+            primaryFolder = primaryCaptureFolder,
             secondaryFolder = secondaryBatchesFolder!!,
             enableAudio = enableAudio,
         )
@@ -750,11 +778,11 @@ class VideoRecorderService :
     }
 
     private fun createSecondaryBatchesFolder(position: CameraPosition): VideoBatchesFolder {
-        return when (batchesFolder.type) {
+        return when (primaryCaptureFolder.type) {
             BatchesFolder.BatchType.INTERNAL -> VideoBatchesFolder.viaInternalFolder(this, position)
             BatchesFolder.BatchType.CUSTOM -> VideoBatchesFolder.viaCustomFolder(
                 this,
-                batchesFolder.customFolder
+                primaryCaptureFolder.customFolder
                     ?: error("Custom folder unavailable for dual recording"),
                 position,
             )
@@ -798,6 +826,7 @@ class VideoRecorderService :
                 val concurrent = cameraProvider!!.bindToLifecycle(
                     listOf(primaryConfig, secondaryConfig)
                 )
+                isCaptureStartRequested = true
 
                 primary = RecordingStream(CameraPosition.fromLensString(settings.videoRecorderSettings.cameraLens)).apply {
                     this.videoCapture = primaryVideoCapture
@@ -810,9 +839,10 @@ class VideoRecorderService :
 
                 // Keep secondary output in same storage type as primary.
                 secondaryBatchesFolder = createSecondaryBatchesFolder(secondary!!.position).also {
-                    it.sessionId = batchesFolder.sessionId
+                    it.sessionId = primaryCaptureFolder.sessionId
                     it.initFolders()
                 }
+                activeSecondaryBatchesFolder = secondaryBatchesFolder
 
                 if (cameraLensMode == "ultrawide") {
                     engageUltraWide(primary.camera)
@@ -898,10 +928,17 @@ class VideoRecorderService :
 
         runOnMain {
             try {
+                val bindStartedAtMs = android.os.SystemClock.elapsedRealtime()
                 primary.camera = cameraProvider!!.bindToLifecycle(
                     this,
                     selectedCamera,
                     primary.videoCapture
+                )
+                isCaptureStartRequested = true
+                Log.i(
+                    TAG,
+                    "📸 CameraX bind/open request submitted in " +
+                        "${android.os.SystemClock.elapsedRealtime() - bindStartedAtMs}ms",
                 )
 
                 val boundCameraId = primary.camera?.cameraInfo?.let {
@@ -1273,7 +1310,7 @@ class VideoRecorderService :
         }
     }
 
-    private fun getNameForMediaFile(folder: VideoBatchesFolder = batchesFolder): String {
+    private fun getNameForMediaFile(folder: VideoBatchesFolder = primaryCaptureFolder): String {
         // Flat naming: alibi-video_recordings-{sessionId}-{counter}.mp4
         // Lexicographic sort = chronological (sessionId is a timestamp).
         val sid = folder.sessionId ?: "00000000000000"
@@ -1285,7 +1322,7 @@ class VideoRecorderService :
     @SuppressLint("MissingPermission", "NewApi")
     private fun prepareVideoRecording(
         videoCapture: VideoCapture<Recorder>,
-        folder: VideoBatchesFolder = batchesFolder,
+        folder: VideoBatchesFolder = primaryCaptureFolder,
     ) =
         videoCapture.output
             .let {
@@ -1348,27 +1385,36 @@ class VideoRecorderService :
             }
 
     override fun getRecordingInformation(): RecordingInformation {
-        val secondaryFolder = secondaryBatchesFolder
+        val primaryFolder = primaryCaptureFolder
+        val secondaryFolder = secondaryCaptureFolder
+        val sessionId = activeRecordingSessionId ?: primaryFolder.sessionId
+        sessionId?.let {
+            // Keep the query path and metadata on the same session even if a
+            // rebinding model replaced the public folder object.
+            primaryFolder.sessionId = it
+            secondaryFolder?.sessionId = it
+        }
         val information = RecordingInformation(
-            folderPath = batchesFolder.exportFolderForSettings(),
+            folderPath = primaryFolder.exportFolderForSettings(),
             recordingStart = recordingStart,
             maxDuration = settings.maxDuration,
-            batchesAmount = batchesFolder.getBatchesForFFmpeg().size,
+            batchesAmount = primaryFolder.getBatchesForFFmpeg().size,
             fileExtension = settings.videoRecorderSettings.fileExtension,
             intervalDuration = settings.intervalDuration,
             type = RecordingInformation.Type.VIDEO,
-            sessionId = batchesFolder.sessionId,
-            primaryCameraPositionName = batchesFolder.cameraPosition.name,
+            sessionId = sessionId,
+            primaryCameraPositionName = primaryFolder.cameraPosition.name,
             secondaryFolderPath = secondaryFolder?.exportFolderForSettings(),
-            secondarySessionId = secondaryFolder?.sessionId,
+            secondarySessionId = secondaryFolder?.sessionId ?: sessionId,
             secondaryCameraPositionName = secondaryFolder?.cameraPosition?.name,
         )
 
         Log.i(
             TAG,
             "💾 Recording information: session=${information.sessionId} chunks=${information.batchesAmount} " +
-                "primary=${batchesFolder.cameraPosition} " +
-                "secondary=${secondaryFolder?.cameraPosition ?: "none"}",
+                "primary=${primaryFolder.cameraPosition} " +
+                "secondary=${secondaryFolder?.cameraPosition ?: "none"} " +
+                "folder=${System.identityHashCode(primaryFolder)}",
         )
         return information
     }

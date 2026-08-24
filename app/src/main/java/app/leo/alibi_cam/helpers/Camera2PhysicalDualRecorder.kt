@@ -117,6 +117,14 @@ class Camera2PhysicalDualRecorder(
         val target: OutputTarget,
     )
 
+    private data class RetiredSegment(
+        val primaryRecorder: MediaRecorder?,
+        val secondaryRecorder: MediaRecorder?,
+        val surfaces: List<Surface>,
+        val pendingUris: List<Uri>,
+        val outputDescriptors: List<ParcelFileDescriptor>,
+    )
+
     var isRecording: Boolean = false
         private set
 
@@ -569,6 +577,13 @@ class Camera2PhysicalDualRecorder(
      * their physical Camera2 session.
      */
     suspend fun rotateNextChunk(counter: Long): Boolean {
+        return rotateNextChunk(counter, onCaptureStarted = null)
+    }
+
+    suspend fun rotateNextChunk(
+        counter: Long,
+        onCaptureStarted: (() -> Unit)?,
+    ): Boolean {
         if (counter <= (currentCounter ?: Long.MIN_VALUE)) {
             Log.d(TAG, "🔄 Skipping physical chunk rotation for already active counter=$counter")
             return true
@@ -578,20 +593,54 @@ class Camera2PhysicalDualRecorder(
         Log.i(TAG, "🔄 Rotating physical segment: current=$currentCounter next=$counter")
         CameraDebugLog.append("🔄 Physical segment restart: current=$currentCounter next=$counter")
         isRecording = false
-        stopCurrentCaptureAndRecorders(stopBackground = false)
 
-        val started = startAndAwait(counter)
+        var started = false
+        try {
+            coroutineScope {
+                val surfacesToRelease = listOfNotNull(primarySurface, secondarySurface)
+                val ready = requestCaptureStop()
+                if (ready != null) {
+                    withTimeoutOrNull(1500L) {
+                        ready.await()
+                    } ?: Log.w(TAG, "📸 Timed out waiting for capture session ready")
+                }
+                finishCaptureStop()
+
+                // Old MediaRecorder.stop() can take about one second on Vivo.
+                // Submit the next camera session while those independent files
+                // finalize; the caller gets a usable stream much sooner.
+                val retired = detachRetiredSegment(surfacesToRelease)
+                val retiredFinalizer = async(Dispatchers.IO) {
+                    finalizeRetiredSegment(retired)
+                }
+
+                try {
+                    started = startAndAwait(counter)
+                    if (started) {
+                        onCaptureStarted?.invoke()
+                        Log.i(TAG, "🔄 ✅ Physical segment restarted at counter=$counter")
+                    } else {
+                        Log.e(TAG, "🔄 ❌ Physical segment restart failed at counter=$counter")
+                        CameraDebugLog.append("❌ Physical segment restart failed counter=$counter")
+                        CameraDebugLog.flush()
+                    }
+                } finally {
+                    retiredFinalizer.join()
+                }
+            }
+        } catch (error: Exception) {
+            started = false
+            Log.e(TAG, "🔄 ❌ Physical segment rotation threw an exception", error)
+            CameraDebugLog.append("❌ Physical segment rotation exception: ${error.message}")
+            CameraDebugLog.flush()
+        }
+
         if (started) {
-            Log.i(TAG, "🔄 ✅ Physical segment restarted at counter=$counter")
             Log.i(TAG, "🔄 Physical segment rotation completed in ${SystemClock.elapsedRealtime() - rotationStartMs}ms")
             CameraDebugLog.append(
                 "🔄 ✅ Physical segment restarted counter=$counter " +
                     "total=${SystemClock.elapsedRealtime() - rotationStartMs}ms",
             )
-        } else {
-            Log.e(TAG, "🔄 ❌ Physical segment restart failed at counter=$counter")
-            CameraDebugLog.append("❌ Physical segment restart failed counter=$counter")
-            CameraDebugLog.flush()
         }
         return started
     }
@@ -617,13 +666,17 @@ class Camera2PhysicalDualRecorder(
      * Commit all pending MediaStore URIs (sets IS_PENDING = 0)
      * so they immediately show up in the gallery and file manager.
      */
-    private fun commitPendingUris() {
+    private fun commitPendingUris(uris: List<Uri>? = null) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.IS_PENDING, 0)
             }
-            synchronized(pendingUris) {
-                for (uri in pendingUris) {
+            val urisToCommit = uris ?: synchronized(pendingUris) {
+                pendingUris.toList().also { pendingUris.clear() }
+            }
+
+            if (urisToCommit.isNotEmpty()) {
+                for (uri in urisToCommit) {
                     try {
                         val count = context.contentResolver.update(uri, values, null, null)
                         Log.i(TAG, "📁 Committed Scoped Storage URI: $uri (updated=$count)")
@@ -633,7 +686,6 @@ class Camera2PhysicalDualRecorder(
                         CameraDebugLog.append("⚠️ Failed to commit URI: ${e.message}")
                     }
                 }
-                pendingUris.clear()
             }
             CameraDebugLog.flush()
         }
@@ -685,10 +737,10 @@ class Camera2PhysicalDualRecorder(
         finishCaptureStop()
         if (stopBackground) {
             finalizeRecorders(stopBackground)
+            releaseSurfaces(surfacesToRelease)
         } else {
-            finalizeRecordersConcurrently(stopBackground)
+            finalizeRetiredSegment(detachRetiredSegment(surfacesToRelease))
         }
-        releaseSurfaces(surfacesToRelease)
         Log.i(
             TAG,
             "⏹️ Physical capture/recorders stopped in ${SystemClock.elapsedRealtime() - stopStartMs}ms " +
@@ -791,45 +843,39 @@ class Camera2PhysicalDualRecorder(
         if (label == "primary") primaryRecorder = null else secondaryRecorder = null
     }
 
-    /**
-     * Rotation path only. The two MediaRecorders own independent encoders and
-     * output files, so their expensive stop() calls can overlap instead of
-     * serializing on the camera-handler thread.
-     */
-    private suspend fun finalizeRecordersConcurrently(stopBackground: Boolean) {
-        val finalizeStartMs = SystemClock.elapsedRealtime()
+    private fun detachRetiredSegment(surfaces: List<Surface>): RetiredSegment {
         val primary = primaryRecorder
         val secondary = secondaryRecorder
+        primaryRecorder = null
+        secondaryRecorder = null
+
+        val uris = synchronized(pendingUris) {
+            pendingUris.toList().also { pendingUris.clear() }
+        }
+        val descriptors = synchronized(outputDescriptors) {
+            outputDescriptors.toList().also { outputDescriptors.clear() }
+        }
+
+        return RetiredSegment(primary, secondary, surfaces, uris, descriptors)
+    }
+
+    private suspend fun finalizeRetiredSegment(segment: RetiredSegment) {
+        val finalizeStartMs = SystemClock.elapsedRealtime()
 
         coroutineScope {
-            val primaryJob = primary?.let { recorder ->
+            val primaryJob = segment.primaryRecorder?.let { recorder ->
                 async(Dispatchers.IO) { finalizeRecorder(recorder, "primary") }
             }
-            val secondaryJob = secondary?.let { recorder ->
+            val secondaryJob = segment.secondaryRecorder?.let { recorder ->
                 async(Dispatchers.IO) { finalizeRecorder(recorder, "secondary") }
             }
             primaryJob?.join()
             secondaryJob?.join()
         }
 
-        // Do not clear a field if another lifecycle event replaced the recorder.
-        if (primary != null && primaryRecorder === primary) primaryRecorder = null
-        if (secondary != null && secondaryRecorder === secondary) secondaryRecorder = null
-
-        if (stopBackground) {
-            try {
-                cameraDevice?.close()
-                cameraDevice = null
-            } catch (e: Exception) {
-                Log.w(TAG, "Error closing camera device", e)
-            }
-        } else {
-            Log.d(TAG, "♻️ Keeping CameraDevice open for the next physical dual segment")
-        }
-
-        commitPendingUris()
-        closeOutputDescriptors()
-        if (stopBackground) stopBackgroundThread()
+        releaseSurfaces(segment.surfaces)
+        commitPendingUris(segment.pendingUris)
+        closeOutputDescriptors(segment.outputDescriptors)
         Log.i(
             TAG,
             "⏹️ Physical recorders finalized concurrently in " +
@@ -862,12 +908,17 @@ class Camera2PhysicalDualRecorder(
         }
     }
 
-    private fun closeOutputDescriptors() {
-        synchronized(outputDescriptors) {
-            outputDescriptors.forEach { descriptor ->
+    private fun closeOutputDescriptors(descriptors: List<ParcelFileDescriptor>? = null) {
+        val descriptorsToClose = descriptors ?: synchronized(outputDescriptors) {
+            outputDescriptors.toList().also { outputDescriptors.clear() }
+        }
+
+        descriptorsToClose.forEach { descriptor ->
                 runCatching { descriptor.close() }
                     .onFailure { Log.w(TAG, "Error closing output descriptor", it) }
             }
+
+        if (descriptors == null) {
             outputDescriptors.clear()
         }
     }
