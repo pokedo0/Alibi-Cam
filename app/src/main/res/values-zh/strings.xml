@@ -262,4 +262,12 @@
     <!-- 永久删除 / Permanently delete recordings -->
     <string name="ui_settings_option_permanentlyDeleteRecordings_title">直接删除视频文件</string>
     <string name="ui_settings_option_permanentlyDeleteRecordings_description">关闭时（默认）：自动删除的视频会进入系统回收站保留 30 天。长时间录制可能堆积大量已删除文件，占用存储空间。建议定期去相册回收站手动清理。\n\n开启后：视频直接永久删除，立即释放存储空间。\n\n适合长时间录制（如外卖配送）的用户。</string>
+
+    <!-- 磁贴和快捷方式 / Quick recording entries -->
+    <string name="quick_recording_audio_short_label">录制音频</string>
+    <string name="quick_recording_audio_long_label">开始录音</string>
+    <string name="quick_recording_audio_disabled">音频录制不可用</string>
+    <string name="quick_recording_video_short_label">录制视频</string>
+    <string name="quick_recording_video_long_label">开始录像</string>
+    <string name="quick_recording_video_disabled">视频录制不可用</string>
 </resources>
