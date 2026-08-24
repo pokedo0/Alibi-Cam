@@ -30,3 +30,6 @@ key.properties
 
 # Backup files
 *.bak
+
+# Gradle home directory
+.gradle-home/
