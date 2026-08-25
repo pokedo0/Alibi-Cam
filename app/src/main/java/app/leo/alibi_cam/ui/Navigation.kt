@@ -114,7 +114,7 @@ fun Navigation(
         dataStore.updateData { it.setLastUpdateCheckTime(now) }
 
         // 更新检查
-        val info = UpdateHelper.checkForUpdate(BuildConfig.VERSION_CODE)
+        val info = UpdateHelper.checkForUpdate(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE)
         if (info != null && settings.dismissedUpdateVersionCode < info.versionCode) {
             autoUpdateInfo = info
         }

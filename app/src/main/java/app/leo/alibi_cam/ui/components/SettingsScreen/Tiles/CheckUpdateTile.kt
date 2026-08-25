@@ -57,7 +57,7 @@ fun CheckUpdateTile(
             .semantics { contentDescription = label }
             .clickable {
                 scope.launch {
-                    val info = UpdateHelper.checkForUpdate(BuildConfig.VERSION_CODE)
+                    val info = UpdateHelper.checkForUpdate(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE)
                     when {
                         info != null -> {
                             onUpdateAvailable(info) {

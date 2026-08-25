@@ -20,15 +20,12 @@ Alibi 会在后台持续录制音视频，并在你需要时保存最后一段�
 - 🔧 **修复 FFmpeg 崩溃 bug** — 修复自动停止时因依赖缺失导致最后一分钟视频丢失的问题
 - ⚡ **默认 24fps** — 从 30fps 降至 24fps，省电约 20%，两轮车场景画面足够流畅
 - 🛑 **自动停止灵敏度调节** — 支持基于姿态检测的自动停止灵敏度设置
-- 🔄 **自动检查更新** — App 启动时自动检查新版本 + 设置页手动检查更新（通过 Gitee 直连）
+- 🔄 **自动检查更新** — App 启动时自动检查新版本 + 设置页手动检查更新（通过 GitHub Releases）
 - 🗑️ **永久删除选项** — 可选择直接永久删除录像，跳过回收站
 
 ## Download / 下载
 
-[<img src="readme_content/github-badge.webp" alt="Get it on GitHub" height="80">](https://github.com/zhanglinleo1-maker/Alibi-Cam/releases)
-[<img src="https://gitee.com/zhanglinleo1-maker/Alibi-Cam/raw/master/readme_content/gitee-badge.png" alt="Get it on Gitee" height="80">](https://gitee.com/zhanglinleo1-maker/Alibi-Cam/releases)
-
-> 国内用户推荐从 Gitee Releases 下载，无需梯子。
+[<img src="readme_content/github-badge.webp" alt="Get it on GitHub" height="80">](https://github.com/pokedo0/Alibi-Cam/releases)
 
 ## 原始版本
 
