@@ -1,6 +1,6 @@
 ![Alibi, Witness every moment](readme_content/banner.webp)
 
-# Alibi-Cam（摩托车/两轮车行车记录仪增强版）
+# Alibi-Cam（两轮车行车记录仪增强版）
 
 <p float="left" align="center">
     <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/01.webp" width="30%" />
@@ -13,22 +13,23 @@
 
 本项目为 [Myzel394/Alibi](https://github.com/Myzel394/Alibi) 的**二次 Fork 增强版**，专为**摩托车/两轮车骑行记录**与**取证**场景深度定制与优化。
 
-Alibi 可以在后台持续循环录制音视频，并在你需要时一键保存最后一段时间的录像。除通过 GitHub Releases API 检查更新外，核心录像与取证功能完全离线运行，无需网络连接。
+> ⚠️ **注意（Protake 包名冲突）**：
+> 为启用多摄并发（绕过 vivo/小米等厂商 HAL 限制），本项目包名设为 `com.blink.academy.protake`。若已安装官方 **Protake** 会发生冲突，需先卸载或自行修改 `applicationId` 重新打包。
 
 ## 二次 Fork 增强特性（本项目）
 
-- 🎥 **双摄像头同步录像** — 支持两个摄像头同时录制（前后双摄或后置多摄），并优化多物理镜头调度逻辑。实际可用性取决于手机厂商的相机 HAL 支持（vivo 手机通常需要更改包名后才可启用）。
-- 🧭 **视频防抖配置** — 单摄像头可启用原生光学防抖（OIS）与 EIS；双摄像头场景防抖效果视厂商实现而定。
-- 🚀 **快速开始录音/录像** — 支持桌面图标 App Shortcuts 快捷入口与下拉通知栏快捷磁贴（Quick Settings Tile），无需进入前台界面即可在后台一键启动录制。
-- 🔄 **GitHub Releases 自动检查更新** — 移除第三方更新源，直连 GitHub 官方 Releases API 检查最新版本并提供一键跳转。
-- 🛡️ **纯净安全** — 彻底清理遥测与分析上报逻辑，保障隐私。
+- 🎥 **双摄同步录像** — 支持前后或后置双摄同时录制，优化多物理镜头调度（需厂商 HAL 支持）(仅基于Vivo手机测试)
+- 🧭 **视频防抖** — 支持原生 OIS 光学防抖与 EIS 配置
+- 🚀 **快捷录制** — 支持桌面 App Shortcuts 与下拉通知栏磁贴，后台一键直录
+- 🔄 **GitHub 检查更新** — 直连 GitHub Releases API 检测最新版本
+- 🛡️ **纯净无遥测** — 彻底清理遥测与多余上报
 
 ## 一次 Fork 继承特性（Alibi-Leo）
 
-- 🔧 **修复 FFmpeg 崩溃 bug** — 修复自动停止录制时因依赖缺失导致最后一分钟视频丢失的问题。
-- ⚡ **默认 24fps 省电** — 从 30fps 降至 24fps，省电约 20%，骑行画面依然清晰流畅。
-- 🛑 **姿态感知自动停止** — 支持基于手机姿态感知的自动停止录像，并支持灵敏度精细调节。
-- 🗑️ **永久删除选项** — 可选择直接物理删除录像文件，绕过系统回收站，方便快速释放存储空间。
+- 🔧 **修复 FFmpeg 崩溃** — 解决自动停止时丢失最后一分钟视频问题
+- ⚡ **默认 24fps** — 相比 30fps 省电约 20%
+- 🛑 **姿态感知停止** — 倾角/运动状态感知自动停止录像（含灵敏度调节）
+- 🗑️ **永久物理删除** — 绕过系统回收站直接释放空间
 
 ## Download / 下载
 
@@ -41,5 +42,4 @@ Alibi 可以在后台持续循环录制音视频，并在你需要时一键保�
 
 ## 许可证 / License
 
-本项目基于 [GPL v3](LICENSE) 开源。Alibi 原作者为 [Myzel394](https://github.com/Myzel394)。
-
+本项目基于 [GPL v3](LICENSE) 开源。原作者为 [Myzel394](https://github.com/Myzel394)。
