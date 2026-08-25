@@ -38,13 +38,13 @@ data class AppSettings(
     val intervalDuration: Long = 5 * 60 * 1000L,
 
     val notificationSettings: NotificationSettings? = null,
-    val deleteRecordingsImmediately: Boolean = false,
+    val deleteRecordingsImmediately: Boolean = true,
     val saveFolder: String? = RECORDER_MEDIA_SELECTED_VALUE,
     // Auto-start recording whenever Alibi is opened，默认关闭（首次启动需手动授权权限）
     val autoRecordOnAppOpen: Boolean = false,
     // ── 传感器自动停止录制 ──
-    // 姿态检测自动停止，默认开启
-    val autoStopSensorEnabled: Boolean = true,
+    // 姿态检测自动停止，默认关闭
+    val autoStopSensorEnabled: Boolean = false,
     // 重力倾斜灵敏度：strict=30° / standard=50° / relaxed=70°，默认 standard
     val autoStopSensitivity: String = "standard",
     // Only trigger auto-stop when the screen is off (double confirmation)，默认关闭
