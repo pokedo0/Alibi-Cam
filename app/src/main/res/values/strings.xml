@@ -284,4 +284,12 @@
     <string name="quick_recording_video_short_label">Record video</string>
     <string name="quick_recording_video_long_label">Start video recording</string>
     <string name="quick_recording_video_disabled">Video recording unavailable</string>
+
+    <!-- Video stabilization -->
+    <string name="ui_settings_option_videoStabilization_title">Video Stabilization</string>
+    <string name="ui_settings_option_videoStabilization_description">Uses the camera\'s electronic or optical stabilization. Availability depends on the selected single or dual camera mode.</string>
+    <string name="ui_settings_option_videoStabilization_checking">Checking camera support…</string>
+    <string name="ui_settings_option_videoStabilization_singleSupported">Single camera supported</string>
+    <string name="ui_settings_option_videoStabilization_dualSupported">Both dual cameras supported</string>
+    <string name="ui_settings_option_videoStabilization_unsupported">Not supported in current mode</string>
 </resources>

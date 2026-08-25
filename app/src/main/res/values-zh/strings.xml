@@ -269,4 +269,12 @@
     <string name="quick_recording_video_short_label">录制视频</string>
     <string name="quick_recording_video_long_label">开始录像</string>
     <string name="quick_recording_video_disabled">视频录制不可用</string>
+
+    <!-- 视频防抖 / Video stabilization -->
+    <string name="ui_settings_option_videoStabilization_title">视频防抖</string>
+    <string name="ui_settings_option_videoStabilization_description">使用摄像头的电子或光学防抖。是否可用取决于当前的单摄或双摄模式。</string>
+    <string name="ui_settings_option_videoStabilization_checking">正在检查摄像头支持情况……</string>
+    <string name="ui_settings_option_videoStabilization_singleSupported">当前单摄支持</string>
+    <string name="ui_settings_option_videoStabilization_dualSupported">双摄均支持</string>
+    <string name="ui_settings_option_videoStabilization_unsupported">当前模式不支持</string>
 </resources>

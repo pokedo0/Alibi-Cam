@@ -35,6 +35,13 @@ object DualCameraSupport {
         val secondaryPhysicalId: String,
     )
 
+    data class PhysicalCameraBinding(
+        val logicalCameraId: String,
+        val physicalId: String,
+        val kind: String,
+        val focalLengthMm: Float?,
+    )
+
     data class SupportedPair(
         val primary: androidx.camera.core.CameraInfo,
         val secondary: androidx.camera.core.CameraInfo,
@@ -139,6 +146,84 @@ object DualCameraSupport {
             CameraDebugLog.append("⚡ Plan=FAST_PHYSICAL ${it.primaryPhysicalId} + ${it.secondaryPhysicalId}")
             DualPlan(Strategy.PHYSICAL_CAMERA2, physicalPair = it)
         } ?: DualPlan(Strategy.NONE)
+    }
+
+    /**
+     * Resolve one concrete rear sensor for a named single-camera preference.
+     * Physical IDs inside a multi-camera are preferred so Vivo-style devices
+     * select ID 2/3/4 instead of opening logical ID 0 and changing zoom.
+     */
+    fun resolveStrictPhysicalCamera(
+        context: Context,
+        requestedLens: String?,
+    ): PhysicalCameraBinding? {
+        if (requestedLens != "main" && requestedLens != "ultrawide" && requestedLens != "telephoto") {
+            Log.i(TAG, "🔍 Strict physical camera unavailable: lens=$requestedLens")
+            return null
+        }
+
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val groupedLogicalIds = mutableSetOf<String>()
+
+        for (logicalId in manager.cameraIdList) {
+            val characteristics = runCatching {
+                manager.getCameraCharacteristics(logicalId)
+            }.getOrNull() ?: continue
+            if (characteristics.get(CameraCharacteristics.LENS_FACING) != CameraSelector.LENS_FACING_BACK) {
+                continue
+            }
+
+            val physicalIds = characteristics.physicalCameraIds
+            if (physicalIds.isEmpty()) continue
+            groupedLogicalIds += logicalId
+
+            val candidates = physicalIds.mapNotNull { id ->
+                val focalLength = readFocalLength(manager, id)
+                val kind = lensKind(focalLength)
+                Triple(id, kind, focalLength)
+            }
+            Log.i(
+                TAG,
+                "🔍 Strict physical candidates logical=$logicalId lens=$requestedLens " +
+                    candidates.joinToString(prefix="[", postfix="]") { (id, kind, focal) ->
+                        "$id:${kind.name.lowercase()}=${focal ?: -1f}mm"
+                    },
+            )
+
+            candidates.firstOrNull { it.second.matches(requestedLens) }?.let { candidate ->
+                val binding = PhysicalCameraBinding(
+                    logicalCameraId = logicalId,
+                    physicalId = candidate.first,
+                    kind = candidate.second.name.lowercase(),
+                    focalLengthMm = candidate.third,
+                )
+                Log.i(TAG, "✅ Strict physical binding lens=$requestedLens ${binding.physicalId} via logical=$logicalId")
+                CameraDebugLog.append("✅ Strict physical $requestedLens=${binding.physicalId} (logical=$logicalId)")
+                return binding
+            }
+        }
+
+        val standaloneCandidate = manager.cameraIdList
+            .filterNot(groupedLogicalIds::contains)
+            .firstOrNull { id ->
+                val characteristics = runCatching {
+                    manager.getCameraCharacteristics(id)
+                }.getOrNull()
+                characteristics?.get(CameraCharacteristics.LENS_FACING) == CameraSelector.LENS_FACING_BACK &&
+                    lensKind(readFocalLength(manager, id)).matches(requestedLens)
+            }
+
+        standaloneCandidate?.let { id ->
+            val focalLength = readFocalLength(manager, id)
+            val binding = PhysicalCameraBinding(id, id, requestedLens, focalLength)
+            Log.i(TAG, "✅ Strict standalone binding lens=$requestedLens id=$id focal=${focalLength ?: -1f}mm")
+            CameraDebugLog.append("✅ Strict standalone $requestedLens=$id")
+            return binding
+        }
+
+        Log.w(TAG, "❌ No strict physical camera found for lens=$requestedLens")
+        CameraDebugLog.append("❌ No strict physical camera for $requestedLens")
+        return null
     }
 
     private fun isRearLens(lens: String?): Boolean =

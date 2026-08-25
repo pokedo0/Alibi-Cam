@@ -519,6 +519,9 @@ data class VideoRecorderSettings(
     // When dualCameraEnabled is true, the primary lens is 'cameraLens' and
     // the secondary lens is 'secondaryCameraLens'. Both files are saved separately.
     val secondaryCameraLens: String? = null,
+    // Hardware EIS/OIS is best-effort: availability depends on the active
+    // single-camera or dual-camera combination.
+    val videoStabilizationEnabled: Boolean = false,
 ) {
     fun setTargetedVideoBitRate(bitRate: Int?): VideoRecorderSettings {
         return copy(targetedVideoBitRate = bitRate)
@@ -548,6 +551,10 @@ data class VideoRecorderSettings(
 
     fun setSecondaryCameraLens(lens: String?): VideoRecorderSettings {
         return copy(secondaryCameraLens = lens)
+    }
+
+    fun setVideoStabilizationEnabled(enabled: Boolean): VideoRecorderSettings {
+        return copy(videoStabilizationEnabled = enabled)
     }
 
     fun getQuality(): Quality? =

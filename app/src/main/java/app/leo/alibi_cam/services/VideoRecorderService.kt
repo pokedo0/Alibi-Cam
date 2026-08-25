@@ -53,6 +53,7 @@ import app.leo.alibi_cam.helpers.CameraDebugLog
 import app.leo.alibi_cam.helpers.CameraPosition
 import app.leo.alibi_cam.helpers.SensorDebugLog
 import app.leo.alibi_cam.ui.utils.DualCameraSupport
+import app.leo.alibi_cam.ui.utils.VideoStabilizationSupport
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -626,14 +627,32 @@ class VideoRecorderService :
         }
         .build()
 
-    private fun buildVideoCapture(recorder: Recorder) = VideoCapture.Builder(recorder)
+    private fun buildVideoCapture(
+        recorder: Recorder,
+        stabilizationTargetIds: List<String>,
+        sourceLabel: String,
+    ): VideoCapture<Recorder> {
+        val builder = VideoCapture.Builder(recorder)
         .apply {
             val frameRate = settings.videoRecorderSettings.targetFrameRate
             if (frameRate != null) {
                 setTargetFrameRate(Range(frameRate, frameRate))
             }
         }
-        .build()
+
+        VideoStabilizationSupport.configureVideoCapture(
+            context = this,
+            builder = builder,
+            targetIds = stabilizationTargetIds,
+            enabled = settings.videoRecorderSettings.videoStabilizationEnabled,
+            sourceLabel = sourceLabel,
+        )
+
+        return builder.build()
+    }
+
+    private fun cameraInfoId(info: androidx.camera.core.CameraInfo): String? =
+        runCatching { Camera2CameraInfo.from(info).cameraId }.getOrNull()
 
     /**
      * Open the camera(s) and optionally engage ultra-wide via zoom ratio.
@@ -670,6 +689,23 @@ class VideoRecorderService :
                 DualCameraSupport.resolveDualPlan(this, cameraProvider!!, primaryLens, secondaryLens)
             }
         } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                DualCameraSupport.resolveStrictPhysicalCamera(this, primaryLens)?.let { binding ->
+                    Log.i(
+                        TAG,
+                        "⚡ Strict single-camera physical binding: logical=${binding.logicalCameraId}, " +
+                            "physical=${binding.physicalId}, lens=${binding.kind}",
+                    )
+                    CameraDebugLog.append(
+                        "⚡ Single physical: lens=$primaryLens, " +
+                            "logical=${binding.logicalCameraId}, physical=${binding.physicalId}",
+                    )
+                    isDualMode = false
+                    openPhysicalSingleCamera(binding)
+                    return
+                }
+            }
+
             ensureCameraProvider()
             DualCameraSupport.DualPlan(DualCameraSupport.Strategy.NONE)
         }
@@ -777,6 +813,60 @@ class VideoRecorderService :
         )
     }
 
+    /** Open one named rear sensor through its shared multi-camera logical device. */
+    @RequiresApi(Build.VERSION_CODES.P)
+    private fun openPhysicalSingleCamera(binding: DualCameraSupport.PhysicalCameraBinding) {
+        Log.i(
+            TAG,
+            "📸 openPhysicalSingleCamera: logical=${binding.logicalCameraId}, " +
+                "physical=${binding.physicalId}, focal=${binding.focalLengthMm ?: -1f}mm",
+        )
+        CameraDebugLog.append(
+            "📸 Physical single READY request: physical=${binding.physicalId}, " +
+                "logical=${binding.logicalCameraId}",
+        )
+
+        physicalDualRecorder = Camera2PhysicalDualRecorder(
+            context = this,
+            settings = settings,
+            logicalCameraId = binding.logicalCameraId,
+            primaryPhysicalId = binding.physicalId,
+            secondaryPhysicalId = null,
+            primaryFolder = primaryCaptureFolder,
+            secondaryFolder = null,
+            enableAudio = enableAudio,
+        ).apply {
+            onLogicalCameraOpen = {
+                isCaptureStartRequested = true
+            }
+        }
+
+        physicalDualRecorder!!.start(
+            counter = counter,
+            onStarted = {
+                Log.i(TAG, "📸 ✅ Physical single camera recorder ready")
+                CameraDebugLog.append("📸 ✅ Physical single recorder READY")
+                runOnMain {
+                    _cameraAvailableListener.complete(Unit)
+                    onCameraControlAvailable()
+                }
+            },
+            onError = { error ->
+                Log.e(TAG, "📸 ❌ Physical single camera failed: $error")
+                CameraDebugLog.append("📸 ❌ Physical single failed: $error")
+                runOnMain {
+                    physicalDualRecorder?.stop()
+                    physicalDualRecorder = null
+                    isDualMode = false
+                    scope.launch {
+                        ensureCameraProvider()
+                        openSingleCamera()
+                    }
+                }
+            },
+        )
+    }
+
     private fun createSecondaryBatchesFolder(position: CameraPosition): VideoBatchesFolder {
         return when (primaryCaptureFolder.type) {
             BatchesFolder.BatchType.INTERNAL -> VideoBatchesFolder.viaInternalFolder(this, position)
@@ -796,13 +886,28 @@ class VideoRecorderService :
     private fun openDualCamera(pair: DualCameraSupport.SupportedPair) {
         val userAspectRatio = settings.videoRecorderSettings.videoAspectRatio ?: "4:3"
         val primaryRecorder = buildRecorder(userAspectRatio)
-        val primaryVideoCapture = buildVideoCapture(primaryRecorder)
+        val primaryStabilizationTargets = listOfNotNull(cameraInfoId(pair.primary))
+        val secondaryStabilizationTargets = listOfNotNull(cameraInfoId(pair.secondary))
+        Log.i(
+            TAG,
+            "🛡 Concurrent stabilization targets: primary=$primaryStabilizationTargets, " +
+                "secondary=$secondaryStabilizationTargets",
+        )
+        val primaryVideoCapture = buildVideoCapture(
+            primaryRecorder,
+            primaryStabilizationTargets,
+            sourceLabel = "primary",
+        )
         val primaryUseCaseGroup = UseCaseGroup.Builder()
             .addUseCase(primaryVideoCapture)
             .build()
 
         val secondaryRecorder = buildRecorder(userAspectRatio)
-        val secondaryVideoCapture = buildVideoCapture(secondaryRecorder)
+        val secondaryVideoCapture = buildVideoCapture(
+            secondaryRecorder,
+            secondaryStabilizationTargets,
+            sourceLabel = "secondary",
+        )
         val secondaryUseCaseGroup = UseCaseGroup.Builder()
             .addUseCase(secondaryVideoCapture)
             .build()
@@ -917,7 +1022,17 @@ class VideoRecorderService :
         onResult: ((Boolean) -> Unit)? = null,
     ) {
         val recorder = buildRecorder(aspectRatio)
-        val videoCap = buildVideoCapture(recorder)
+        val stabilizationTargetIds = listOfNotNull(
+            VideoStabilizationSupport.resolveSingleTargetId(
+                this,
+                settings.videoRecorderSettings.cameraLens,
+            ),
+        )
+        val videoCap = buildVideoCapture(
+            recorder,
+            stabilizationTargetIds,
+            sourceLabel = "single",
+        )
 
         primary = RecordingStream(CameraPosition.SINGLE).apply {
             this.videoCapture = videoCap
@@ -943,6 +1058,16 @@ class VideoRecorderService :
 
                 val boundCameraId = primary.camera?.cameraInfo?.let {
                     Camera2CameraInfo.from(it).cameraId
+                }
+                if (
+                    settings.videoRecorderSettings.videoStabilizationEnabled &&
+                    boundCameraId != stabilizationTargetIds.firstOrNull()
+                ) {
+                    Log.w(
+                        TAG,
+                        "🛡 Bound camera differs from stabilization probe: " +
+                            "bound=$boundCameraId probed=${stabilizationTargetIds.firstOrNull()}",
+                    )
                 }
                 Log.i(TAG, "📸 ✅ Camera bound! ID=$boundCameraId, ratio=${aspectRatio ?: "4:3"}")
                 CameraDebugLog.append("📸 ✅ Camera BOUND! ID=$boundCameraId, ratio=${aspectRatio ?: "4:3"}")

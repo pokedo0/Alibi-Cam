@@ -72,6 +72,7 @@ import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.AutoStopSensorTile
 import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.VideoRecorderBitrateTile
 import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.VideoRecorderFrameRateTile
 import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.VideoRecorderQualityTile
+import app.leo.alibi_cam.ui.components.SettingsScreen.Tiles.VideoStabilizationTile
 import app.leo.alibi_cam.ui.components.SettingsScreen.atoms.InAppLanguagePicker
 import app.leo.alibi_cam.ui.components.SettingsScreen.atoms.ThemeSelector
 import app.leo.alibi_cam.ui.components.atoms.GlobalSwitch
@@ -211,6 +212,7 @@ fun SettingsScreen(
                         VideoRecorderBitrateTile(settings = settings)
                         VideoRecorderFrameRateTile(settings = settings)
                         DualCameraTile(settings = settings)
+                        VideoStabilizationTile(settings = settings)
                         CameraLensTile(settings = settings)
                         VideoAspectRatioTile(settings = settings)
                     }

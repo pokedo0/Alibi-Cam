@@ -170,16 +170,12 @@ abstract class BaseRecorderModel<I, B : BatchesFolder, T : IntervalRecorderServi
             batchesFolder = recorder.batchesFolder
         }
 
-        val serviceSettingsInitialized = runCatching {
-            recorder.settings
-            true
-        }.getOrElse { error ->
+        val serviceSettingsInitialized = recorder.isSettingsInitialized
+        if (!serviceSettingsInitialized) {
             Log.i(
                 TAG,
                 "Connected to ${intentClass.simpleName} before settings initialization",
-                error,
             )
-            false
         }
 
         if (serviceIsActive && serviceSettingsInitialized) {

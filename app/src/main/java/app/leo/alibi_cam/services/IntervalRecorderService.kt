@@ -16,6 +16,9 @@ abstract class IntervalRecorderService<I, B : BatchesFolder> :
 
     lateinit var settings: AppSettings
 
+    val isSettingsInitialized: Boolean
+        get() = ::settings.isInitialized
+
     private var cycleTimer: ScheduledExecutorService? = null
 
     abstract var batchesFolder: B

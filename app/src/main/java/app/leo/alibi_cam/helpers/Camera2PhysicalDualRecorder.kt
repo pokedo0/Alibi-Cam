@@ -28,6 +28,7 @@ import android.view.WindowManager
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import app.leo.alibi_cam.db.AppSettings
+import app.leo.alibi_cam.ui.utils.VideoStabilizationSupport
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import kotlinx.coroutines.CompletableDeferred
@@ -57,13 +58,14 @@ class Camera2PhysicalDualRecorder(
     private val settings: AppSettings,
     private val logicalCameraId: String,
     private val primaryPhysicalId: String,
-    private val secondaryPhysicalId: String,
+    private val secondaryPhysicalId: String?,
     private val primaryFolder: VideoBatchesFolder,
-    private val secondaryFolder: VideoBatchesFolder,
+    private val secondaryFolder: VideoBatchesFolder?,
     private val enableAudio: Boolean = false,
 ) {
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    private val isSinglePhysicalStream = secondaryPhysicalId == null || secondaryFolder == null
     @Volatile
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
@@ -89,6 +91,17 @@ class Camera2PhysicalDualRecorder(
     private var currentCounter: Long? = null
     private val supportedVideoSizes = ConcurrentHashMap<Pair<String, Boolean>, Pair<Int, Int>>()
     private val sensorOrientations = ConcurrentHashMap<String, Int>()
+    @Volatile
+    private var activeStabilizationRequests: Map<String, String> = emptyMap()
+
+    init {
+        if (secondaryPhysicalId != null && secondaryFolder == null) {
+            val message =
+                "Secondary physical=$secondaryPhysicalId has no output folder; forcing single stream"
+            Log.w(TAG, "⚠️ $message")
+            CameraDebugLog.append("⚠️ Physical recorder: $message")
+        }
+    }
 
     private data class OutputTarget(
         val uri: Uri? = null,
@@ -109,7 +122,7 @@ class Camera2PhysicalDualRecorder(
 
     private data class SegmentTargets(
         val primary: OutputTarget,
-        val secondary: OutputTarget,
+        val secondary: OutputTarget?,
     )
 
     private data class PreparedRecorder(
@@ -159,15 +172,24 @@ class Camera2PhysicalDualRecorder(
         onError: (String) -> Unit,
     ) {
         currentCounter = counter
-        Log.i(TAG, "🎬 Starting Camera2PhysicalDualRecorder: primary=$primaryPhysicalId, secondary=$secondaryPhysicalId, counter=$counter, audio=$enableAudio")
-        CameraDebugLog.append("🎬 Start Camera2Physical: prim=$primaryPhysicalId, sec=$secondaryPhysicalId, count=$counter, audio=$enableAudio")
+        val streamMode = if (isSinglePhysicalStream) "single" else "dual"
+        Log.i(
+            TAG,
+            "🎬 Starting Camera2PhysicalDualRecorder mode=$streamMode: " +
+                "primary=$primaryPhysicalId, secondary=$secondaryPhysicalId, " +
+                "counter=$counter, audio=$enableAudio",
+        )
+        CameraDebugLog.append(
+            "🎬 Start Camera2Physical($streamMode): prim=$primaryPhysicalId, " +
+                "sec=$secondaryPhysicalId, count=$counter, audio=$enableAudio",
+        )
 
         startBackgroundThread()
 
         try {
             if (cameraDevice != null) {
-                Log.i(TAG, "♻️ Reusing open CameraDevice for next physical dual segment")
-                CameraDebugLog.append("♻️ Reuse CameraDevice for counter=$counter")
+                Log.i(TAG, "♻️ Reusing open CameraDevice for next physical $streamMode segment")
+                CameraDebugLog.append("♻️ Reuse CameraDevice($streamMode) for counter=$counter")
                 prepareOutputs(counter)
                 createDualCaptureSession(onStarted, onError)
                 return
@@ -198,13 +220,25 @@ class Camera2PhysicalDualRecorder(
         try {
             // Primary gets audio if enabled, secondary is video-only to prevent microphone collision
             val primary = createMediaRecorder(primaryFolder, primaryPhysicalId, counter, includeAudio = enableAudio)
-            val secondary = createMediaRecorder(secondaryFolder, secondaryPhysicalId, counter, includeAudio = false)
             primaryRecorder = primary.recorder
-            secondaryRecorder = secondary.recorder
-            segmentTargets[counter] = SegmentTargets(primary.target, secondary.target)
-
             primarySurface = primaryRecorder!!.surface
-            secondarySurface = secondaryRecorder!!.surface
+
+            var secondary: PreparedRecorder? = null
+            if (!isSinglePhysicalStream) {
+                secondary = createMediaRecorder(
+                    secondaryFolder!!,
+                    secondaryPhysicalId!!,
+                    counter,
+                    includeAudio = false,
+                )
+                secondaryRecorder = secondary.recorder
+                secondarySurface = secondary.recorder.surface
+            } else {
+                secondaryRecorder = null
+                secondarySurface = null
+            }
+
+            segmentTargets[counter] = SegmentTargets(primary.target, secondary?.target)
         } catch (error: Exception) {
             isOutputPreparationFailed = true
             throw error
@@ -220,19 +254,27 @@ class Camera2PhysicalDualRecorder(
             onLogicalCameraOpen?.invoke()
             val openStartedAtMs = SystemClock.elapsedRealtime()
             logOpenRequestPriority()
+            // Device lifecycle callbacks can arrive after stopBackgroundThread().
+            // Use the main executor so HAL onClosed cannot post into a dead
+            // worker; capture result callbacks still use backgroundHandler.
+            Log.d(TAG, "📸 Opening logical camera callbacks=main-executor id=$logicalCameraId")
             cameraManager.openCamera(
                 logicalCameraId,
+                ContextCompat.getMainExecutor(context),
                 object : CameraDevice.StateCallback() {
                     override fun onOpened(device: CameraDevice) {
                         val openDurationMs = SystemClock.elapsedRealtime() - openStartedAtMs
-                        Log.i(TAG, "📸 Camera $logicalCameraId opened for physical dual streaming in ${openDurationMs}ms")
+                        val streamMode = if (isSinglePhysicalStream) "single-stream" else "dual-stream"
+                        Log.i(TAG, "📸 Camera $logicalCameraId opened for physical $streamMode streaming in ${openDurationMs}ms")
                         CameraDebugLog.append("📸 Camera $logicalCameraId opened in ${openDurationMs}ms")
 
                         if (isOutputPreparationFailed) {
                             device.close()
                         } else {
                             cameraDevice = device
-                            if (primarySurface != null && secondarySurface != null) {
+                            if (primarySurface != null &&
+                                (isSinglePhysicalStream || secondarySurface != null)
+                            ) {
                                 createDualCaptureSession(onStarted, onError)
                             }
                         }
@@ -255,7 +297,6 @@ class Camera2PhysicalDualRecorder(
                         onError(errMsg)
                     }
                 },
-                backgroundHandler
             )
         } catch (e: Exception) {
             val msg = "Camera2PhysicalDualRecorder init failed: ${e.message}"
@@ -282,21 +323,35 @@ class Camera2PhysicalDualRecorder(
     ) {
         val device = cameraDevice ?: return
         val pSurface = primarySurface ?: return
-        val sSurface = secondarySurface ?: return
+        val sSurface = secondarySurface
+        if (!isSinglePhysicalStream && sSurface == null) return
 
         val primaryConfig = OutputConfiguration(pSurface).apply {
             setPhysicalCameraId(primaryPhysicalId)
         }
-        val secondaryConfig = OutputConfiguration(sSurface).apply {
-            setPhysicalCameraId(secondaryPhysicalId)
+
+        val outputConfigs = buildList {
+            add(primaryConfig)
+            if (sSurface != null && secondaryPhysicalId != null) {
+                add(
+                    OutputConfiguration(sSurface).apply {
+                        setPhysicalCameraId(secondaryPhysicalId)
+                    },
+                )
+            }
         }
 
-        Log.i(TAG, "📸 Creating SessionConfiguration with physical streams: [$primaryPhysicalId, $secondaryPhysicalId]")
+        Log.i(
+            TAG,
+            "📸 Creating SessionConfiguration physical streams=" +
+                listOfNotNull(primaryPhysicalId, secondaryPhysicalId)
+                    .joinToString(prefix = "[", postfix = "]"),
+        )
         CameraDebugLog.append("📸 Creating Session: prim physical=$primaryPhysicalId, sec physical=$secondaryPhysicalId")
 
         val sessionConfig = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR,
-            listOf(primaryConfig, secondaryConfig),
+            outputConfigs,
             ContextCompat.getMainExecutor(context),
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
@@ -310,11 +365,13 @@ class Camera2PhysicalDualRecorder(
                         // 2. Build CaptureRequest with standard auto controls
                         val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                             addTarget(pSurface)
-                            addTarget(sSurface)
+                            if (sSurface != null) addTarget(sSurface)
                             set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
                             set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                             set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
                         }
+
+                        applyStabilizationControls(requestBuilder)
 
                         // 3. Start Repeating Request with logging callback
                         session.setRepeatingRequest(
@@ -327,8 +384,20 @@ class Camera2PhysicalDualRecorder(
                                     result: TotalCaptureResult,
                                 ) {
                                     frameCount++
-                                    if (frameCount % 60 == 0) {
-                                        Log.d(TAG, "📸 Physical streams capturing... frame #$frameCount")
+                                    if (frameCount % 60 == 1) {
+                                        Log.d(
+                                            TAG,
+                                            "📸 Physical ${
+                                                if (isSinglePhysicalStream) "stream" else "streams"
+                                            } capturing... frame #$frameCount",
+                                        )
+                                        VideoStabilizationSupport.logPhysicalEffective(
+                                            TAG,
+                                            result,
+                                            primaryPhysicalId,
+                                            secondaryPhysicalId,
+                                            activeStabilizationRequests,
+                                        )
                                     }
                                 }
 
@@ -343,8 +412,9 @@ class Camera2PhysicalDualRecorder(
                             backgroundHandler
                         )
 
-                        Log.i(TAG, "📸 ✅ Camera2 physical dual recording started successfully!")
-                        CameraDebugLog.append("📸 ✅ Camera2 physical dual streams STARTED!")
+                        val streamMode = if (isSinglePhysicalStream) "single stream" else "dual streams"
+                        Log.i(TAG, "📸 ✅ Camera2 physical $streamMode recording started successfully!")
+                        CameraDebugLog.append("📸 ✅ Camera2 physical $streamMode STARTED!")
                         CameraDebugLog.flush()
 
                         onStarted()
@@ -363,7 +433,10 @@ class Camera2PhysicalDualRecorder(
                 }
 
                 override fun onConfigureFailed(session: CameraCaptureSession) {
-                    val msg = "Physical dual session configuration failed"
+                    val msg =
+                        "Physical ${
+                            if (isSinglePhysicalStream) "single" else "dual"
+                        } session configuration failed"
                     Log.e(TAG, msg)
                     CameraDebugLog.append("📸 ❌ $msg")
                     CameraDebugLog.flush()
@@ -389,6 +462,178 @@ class Camera2PhysicalDualRecorder(
         }
     }
 
+    private fun applyStabilizationControls(requestBuilder: CaptureRequest.Builder): Map<String, String> {
+        val enabled = settings.videoRecorderSettings.videoStabilizationEnabled
+        val requestedCameras = buildList {
+            add("primary" to primaryPhysicalId)
+            if (!isSinglePhysicalStream && secondaryPhysicalId != null) {
+                add("secondary" to secondaryPhysicalId)
+            }
+        }
+        val capabilities = requestedCameras.associate { (label, cameraId) ->
+            val capability = VideoStabilizationSupport.readCapability(cameraManager, cameraId)
+            Log.i(
+                TAG,
+                "🛡 Physical stabilization request enabled=$enabled camera=$label/$cameraId " +
+                "eis=${capability.electronic} ois=${capability.optical}",
+            )
+
+            cameraId to capability
+        }
+
+        val anyOis = capabilities.values.any { it.optical }
+        val requestedModes = capabilities.mapValues { (_, capability) ->
+            when {
+                !enabled -> "none"
+                capability.optical -> "ois-only"
+
+                // In a dual session, prefer real OIS where it exists and leave the
+                // other sensor untouched while probing the OIS-only stream.
+                anyOis -> "untouched"
+                capability.electronic -> "eis-only"
+                else -> "none"
+            }
+        }
+        val backend = if (isSinglePhysicalStream) "exact-physical" else "physical-per-stream"
+        Log.i(
+            TAG,
+            "🛡 Physical stabilization strategy=$backend enabled=$enabled requests=" +
+                requestedModes.entries.joinToString(prefix="[", postfix="]") { entry ->
+                    "${entry.key}:${entry.value}"
+                },
+        )
+
+        if (requestedModes.values.all { it == "none" }) {
+            activeStabilizationRequests = requestedModes
+            return requestedModes
+        }
+
+        var appliedPerStream = false
+        var oisKeyAttempted = false
+        var oisKeyAccepted = false
+        requestedModes.forEach { (cameraId, mode) ->
+            if (mode == "untouched") {
+                Log.i(
+                    TAG,
+                    "🛡 Physical stabilization skipping camera=$cameraId; " +
+                        "single-OIS dual probe leaves it unmanaged",
+                )
+                return@forEach
+            }
+
+            val keyResults = mutableListOf<String>()
+            var cameraAcceptedAnyKey = false
+            var cameraOisAccepted = false
+
+            fun inject(label: String, key: CaptureRequest.Key<Int>, value: Int) {
+                try {
+                    requestBuilder.setPhysicalCameraKey(key, value, cameraId)
+                    keyResults += "$label=accepted"
+                    cameraAcceptedAnyKey = true
+                } catch (error: IllegalArgumentException) {
+                    keyResults += "$label=rejected"
+                    Log.w(
+                        TAG,
+                        "🛡 Physical stabilization key rejected camera=$cameraId " +
+                            "mode=$mode key=$label",
+                        error,
+                    )
+                }
+            }
+
+            when (mode) {
+                "ois-only" -> {
+                    oisKeyAttempted = true
+                    inject("ois-on", CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                        CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                    cameraOisAccepted = cameraAcceptedAnyKey
+                    oisKeyAccepted = oisKeyAccepted || cameraOisAccepted
+
+                    // Disable EIS only after OIS is accepted, so a rejected OIS
+                    // probe cannot leave an EIS-off override behind before the
+                    // common-EIS fallback runs.
+                    if (cameraOisAccepted && capabilities[cameraId]?.electronic == true) {
+                        inject("eis-off", CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                            CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+                    }
+                }
+                "eis-only" -> {
+                    inject("eis-on", CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                        CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+                }
+            }
+
+            if (cameraAcceptedAnyKey) {
+                appliedPerStream = true
+            }
+            Log.i(
+                TAG,
+                "🛡 Physical stabilization injection camera=$cameraId mode=$mode " +
+                    "keys=${keyResults.joinToString(prefix="[", postfix="]")}",
+            )
+        }
+
+        if (appliedPerStream) {
+            Log.i(
+                TAG,
+                "🛡 Physical stabilization using per-stream result; no common rewrite",
+            )
+            activeStabilizationRequests = requestedModes
+            return requestedModes
+        }
+
+        // Some OEM multi-camera HALs reject every physical override. Only rewrite the
+        // whole logical request when that same mode is valid on every physical stream;
+        // otherwise a global value would contradict the selected per-lens strategy.
+        val allOis = capabilities.values.isNotEmpty() && capabilities.values.all { it.optical }
+        val allEis = capabilities.values.isNotEmpty() && capabilities.values.all { it.electronic }
+        val commonMode = when {
+            allOis -> "ois-only"
+            !anyOis && allEis -> "eis-only"
+            // The single-OIS probe failed, so use the only mode safe for every
+            // stream instead of leaving the OIS-capable lens unstabilized.
+            allEis -> "eis-only"
+            else -> "none"
+        }
+
+        val commonModes = capabilities.keys.associateWith { commonMode }
+        try {
+            when (commonMode) {
+                "ois-only" -> {
+                    requestBuilder.set(
+                        CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                        CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF,
+                    )
+                    requestBuilder.set(
+                        CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                        CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON,
+                    )
+                }
+                "eis-only" -> {
+                    requestBuilder.set(
+                        CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                        CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON,
+                    )
+                }
+            }
+        } catch (error: IllegalArgumentException) {
+            Log.e(TAG, "🛡 Common stabilization request rejected by camera HAL", error)
+        }
+
+        val fallbackReason = when {
+            allOis -> "common-ois"
+            oisKeyAttempted && !oisKeyAccepted && allEis ->
+                "single-ois-failed-common-eis"
+            !anyOis && allEis -> "common-eis"
+            else -> "common-eis"
+        }
+        Log.i(
+            TAG,
+            "🛡 Physical stabilization fallback mode=$commonMode reason=$fallbackReason",
+        )
+        activeStabilizationRequests = commonModes
+        return commonModes
+    }
     private fun querySupportedVideoSize(cameraId: String, target16_9: Boolean): Pair<Int, Int> {
         try {
             val chars = cameraManager.getCameraCharacteristics(cameraId)
@@ -736,8 +981,9 @@ class Camera2PhysicalDualRecorder(
         }
         finishCaptureStop()
         if (stopBackground) {
-            finalizeRecorders(stopBackground)
-            releaseSurfaces(surfacesToRelease)
+            finalizeRetiredSegment(detachRetiredSegment(surfacesToRelease))
+            closeCameraDevice()
+            stopBackgroundThread()
         } else {
             finalizeRetiredSegment(detachRetiredSegment(surfacesToRelease))
         }
@@ -754,6 +1000,15 @@ class Camera2PhysicalDualRecorder(
         finishCaptureStop()
         finalizeRecorders(stopBackground)
         releaseSurfaces(surfacesToRelease)
+    }
+
+    private fun closeCameraDevice() {
+        try {
+            cameraDevice?.close()
+            cameraDevice = null
+        } catch (e: Exception) {
+            Log.w(TAG, "Error closing camera device", e)
+        }
     }
 
     private fun requestCaptureStop(): CompletableDeferred<Unit>? {
@@ -930,6 +1185,10 @@ class Camera2PhysicalDualRecorder(
     }
 
     private suspend fun muxPrimaryAudioIntoSecondary() = withContext(Dispatchers.IO) {
+        if (isSinglePhysicalStream) {
+            Log.i(TAG, "🔊 Single physical stream already carries audio; skip mux")
+            return@withContext
+        }
         if (!enableAudio) {
             Log.i(TAG, "🔊 Shared audio disabled; skip physical secondary mux")
             return@withContext
@@ -940,8 +1199,13 @@ class Camera2PhysicalDualRecorder(
         CameraDebugLog.append("🔊 Mux shared audio segments=${targets.size}")
 
         for ((counter, segment) in targets) {
+            val secondaryTarget = segment.secondary
+            if (secondaryTarget == null) {
+                Log.w(TAG, "🔊 Skip audio mux counter=$counter: secondary target unavailable")
+                continue
+            }
             val primaryInput = getFfmpegInput(segment.primary)
-            val secondaryInput = getFfmpegInput(segment.secondary)
+            val secondaryInput = getFfmpegInput(secondaryTarget)
             if (primaryInput == null || secondaryInput == null) {
                 Log.w(TAG, "🔊 Skip audio mux counter=$counter: input unavailable")
                 CameraDebugLog.append("⚠️ Audio mux skip counter=$counter input unavailable")
@@ -972,7 +1236,7 @@ class Camera2PhysicalDualRecorder(
 
                 val succeeded = runFfmpeg(command)
                 if (succeeded && temporaryOutput.exists() && temporaryOutput.length() > 0L) {
-                    val copied = copyFileToTarget(temporaryOutput, segment.secondary)
+                    val copied = copyFileToTarget(temporaryOutput, secondaryTarget)
                     if (copied) {
                         Log.i(TAG, "🔊 ✅ Mux success counter=$counter, secondary audio replaced")
                         CameraDebugLog.append("🔊 ✅ Mux success counter=$counter")
