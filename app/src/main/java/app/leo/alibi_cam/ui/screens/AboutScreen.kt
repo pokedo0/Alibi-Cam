@@ -1,12 +1,8 @@
 package app.leo.alibi_cam.ui.screens
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,7 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -39,7 +35,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -49,11 +44,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.leo.alibi_cam.BuildConfig
 import app.leo.alibi_cam.R
-import app.leo.alibi_cam.ui.CONTACT_METHODS
+import app.leo.alibi_cam.ui.GITHUB_ISSUES_URL
 import app.leo.alibi_cam.ui.REPO_URL
 import app.leo.alibi_cam.ui.TRANSLATION_HELP_URL
-import app.leo.alibi_cam.ui.components.AboutScreen.atoms.DonationsTile
-import app.leo.alibi_cam.ui.components.AboutScreen.atoms.GPGKeyOverview
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,8 +83,8 @@ fun AboutScreen(
             modifier = Modifier
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(48.dp),
+                .padding(horizontal = 32.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Column(
@@ -101,7 +94,7 @@ fun AboutScreen(
                 Box(
                     modifier = Modifier
                         .clip(CircleShape)
-                        .size(200.dp)
+                        .size(160.dp)
                         .background(
                             MaterialTheme.colorScheme.surfaceVariant
                         ),
@@ -113,77 +106,48 @@ fun AboutScreen(
                 }
                 Text(
                     text = stringResource(R.string.app_name),
-                    style = MaterialTheme.typography.headlineLarge,
+                    style = MaterialTheme.typography.headlineMedium,
                 )
                 Text(
-                    text = "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) — Leo魔改版",
+                    text = "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
                     style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            // ── Leo魔改版说明 ──
+
+            // ── 项目说明 ──
             Column(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "关于Alibi Leo魔改版",
+                    text = "关于 Alibi-Cam",
                     style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    text = "关于Alibi，您现在使用的Alibi是Leo同学基于开源软件Alibi的修改版本。" +
-                            "Leo同学基于两轮车行车记录仪的需求，做了一些优化调整，包括：\n" +
-                            "• 摄像头增加超广角选项\n" +
-                            "• 增加录制比例 4:3 选项\n" +
-                            "• 增加 NFC 启动模式\n" +
-                            "• 增加打开 App 自动录制选项\n" +
-                            "• 增加手机姿态感知停止录像模式\n" +
-                            "• 修改最大时长和片段时长的存储逻辑\n" +
-                            "• 修改默认录制参数\n" +
-                            "简单来说，增强了易用性，实现快速无感的使用。\n\n" +
-                            "如有使用上的问题，可以联系Leo同学：",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                // Leo 邮箱，点击复制
-                val leoEmail = "915945107@qq.com"
-                val clipboardManager =
-                    LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                Row(
-                    modifier = Modifier
-                        .clip(MaterialTheme.shapes.medium)
-                        .clickable {
-                            val clip = ClipData.newPlainText("email", leoEmail)
-                            clipboardManager.setPrimaryClip(clip)
-                        }
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        Icons.Default.ContentCopy,
-                        contentDescription = null,
-                        modifier = Modifier.size(ButtonDefaults.IconSize),
-                    )
-                    Text(
-                        text = leoEmail,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
-                Text(
-                    text = "亦可直接联系原作者 Myzel394。",
+                    text = "Alibi-Cam 是基于开源项目 Alibi 的二次增强版本，专为摩托车/两轮车骑行记录与证据留存优化。\n\n" +
+                            "主要增强特性：\n" +
+                            "• 双摄像头同步录像与多物理镜头调度\n" +
+                            "• 原生视频防抖（EIS / OIS）配置\n" +
+                            "• 桌面 App Shortcuts 与下拉磁贴快速开始录制\n" +
+                            "• 基于手机姿态感知的自动停止录像\n" +
+                            "• 默认 24fps 骑行省电优化\n" +
+                            "• 修复自动停止时 FFmpeg 崩溃导致片段丢失\n" +
+                            "• 支持直接物理删除录像（绕过回收站）\n" +
+                            "• 直连 GitHub Releases 官方版本更新检测\n\n" +
+                            "所有核心录像功能均离线运行，保障数据安全与个人隐私。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
 
+            // ── 源码与链接 ──
             Column(
-                verticalArrangement = Arrangement.spacedBy(24.dp)
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 Text(
-                    stringResource(R.string.ui_about_contribute_title),
+                    text = "开源与社区",
                     style = MaterialTheme.typography.titleMedium,
-                )
-                Text(
-                    stringResource(R.string.ui_about_contribute_message),
-                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold,
                 )
 
                 val githubLabel = stringResource(R.string.accessibility_open_in_browser, REPO_URL)
@@ -212,8 +176,42 @@ fun AboutScreen(
                     )
                     Spacer(modifier = Modifier.width(ButtonDefaults.IconSpacing))
                     Text(
-                        stringResource(R.string.ui_about_contribute_development),
+                        text = "GitHub 仓库主页",
                         fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Icon(
+                        Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = null,
+                        modifier = Modifier.size(ButtonDefaults.IconSize)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(MaterialTheme.shapes.medium)
+                        .clickable {
+                            uriHandler.openUri(GITHUB_ISSUES_URL)
+                        }
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant
+                        )
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Outlined.BugReport,
+                        contentDescription = null,
+                        modifier = Modifier.size(ButtonDefaults.IconSize.times(1.2f)),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.width(ButtonDefaults.IconSpacing))
+                    Text(
+                        text = "问题反馈与建议 (Issues)",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodyMedium,
                     )
                     Icon(
                         Icons.AutoMirrored.Filled.OpenInNew,
@@ -251,6 +249,7 @@ fun AboutScreen(
                     Text(
                         stringResource(R.string.ui_about_contribute_translation),
                         fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodyMedium,
                     )
                     Icon(
                         Icons.AutoMirrored.Filled.OpenInNew,
@@ -258,58 +257,6 @@ fun AboutScreen(
                         modifier = Modifier.size(ButtonDefaults.IconSize)
                     )
                 }
-
-                DonationsTile()
-
-                Text(
-                    stringResource(R.string.ui_about_support_title),
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                Text(
-                    stringResource(R.string.ui_about_support_message),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val clipboardManager =
-                        LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-
-                    for (contact in CONTACT_METHODS) {
-                        val name = contact.key
-                        val uri = contact.value
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(MaterialTheme.shapes.medium)
-                                .clickable {
-                                    val clip = ClipData.newPlainText("text", uri)
-                                    clipboardManager.setPrimaryClip(clip)
-                                }
-                                .padding(16.dp)
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(
-                                Icons.Default.ContentCopy,
-                                contentDescription = null,
-                            )
-                            Text(
-                                name,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Bold,
-                            )
-                            Text(
-                                uri,
-                                fontSize = MaterialTheme.typography.bodyMedium.fontSize.times(0.5),
-                            )
-                        }
-                    }
-                }
-
-                GPGKeyOverview()
             }
         }
     }
