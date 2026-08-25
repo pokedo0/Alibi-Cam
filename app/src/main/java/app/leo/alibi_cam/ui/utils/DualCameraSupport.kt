@@ -7,7 +7,6 @@ import android.os.Build
 import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
-import app.leo.alibi_cam.helpers.CameraDebugLog
 
 /**
  * Resolves dual-camera capabilities in hardware terms instead of assuming
@@ -67,14 +66,9 @@ object DualCameraSupport {
                 TAG,
                 "🔍 Dual support: camerax=$cameraxAvailable, physical=$physicalAvailable",
             )
-            CameraDebugLog.append(
-                "🔍 Dual support: camerax=$cameraxAvailable, physical=$physicalAvailable",
-            )
             cameraxAvailable || physicalAvailable
         } catch (e: Exception) {
             Log.w(TAG, "Failed to resolve dual-camera support", e)
-            CameraDebugLog.append("⚠️ Dual support check failed: ${e.message}")
-            CameraDebugLog.flush()
             false
         }
     }
@@ -95,7 +89,6 @@ object DualCameraSupport {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             findPairForLenses(context, provider, primaryLens, secondaryLens)?.let {
                 Log.i(TAG, "✅ Using CameraX concurrent pair for $primaryLens + $secondaryLens")
-                CameraDebugLog.append("✅ Plan=CAMERAX for $primaryLens + $secondaryLens")
                 return DualPlan(Strategy.CONCURRENT_CAMERAX, cameraxPair = it)
             }
         }
@@ -109,16 +102,11 @@ object DualCameraSupport {
                     "✅ Using Camera2 physical pair: logical=${it.logicalCameraId}, " +
                         "primary=${it.primaryPhysicalId}, secondary=${it.secondaryPhysicalId}",
                 )
-                CameraDebugLog.append(
-                    "✅ Plan=PHYSICAL_CAMERA2 logical=${it.logicalCameraId} " +
-                        "primary=${it.primaryPhysicalId} secondary=${it.secondaryPhysicalId}",
-                )
                 return DualPlan(Strategy.PHYSICAL_CAMERA2, physicalPair = it)
             }
         }
 
         Log.w(TAG, "❌ No dual plan for $primaryLens + $secondaryLens")
-        CameraDebugLog.append("❌ Plan=NONE for $primaryLens + $secondaryLens")
         return DualPlan(Strategy.NONE)
     }
 
@@ -143,7 +131,6 @@ object DualCameraSupport {
 
         return findPhysicalPair(context, primaryLens, secondaryLens)?.let {
             Log.i(TAG, "⚡ Fast physical pair: logical=${it.logicalCameraId}, ${it.primaryPhysicalId} + ${it.secondaryPhysicalId}")
-            CameraDebugLog.append("⚡ Plan=FAST_PHYSICAL ${it.primaryPhysicalId} + ${it.secondaryPhysicalId}")
             DualPlan(Strategy.PHYSICAL_CAMERA2, physicalPair = it)
         } ?: DualPlan(Strategy.NONE)
     }
@@ -198,7 +185,6 @@ object DualCameraSupport {
                     focalLengthMm = candidate.third,
                 )
                 Log.i(TAG, "✅ Strict physical binding lens=$requestedLens ${binding.physicalId} via logical=$logicalId")
-                CameraDebugLog.append("✅ Strict physical $requestedLens=${binding.physicalId} (logical=$logicalId)")
                 return binding
             }
         }
@@ -217,12 +203,10 @@ object DualCameraSupport {
             val focalLength = readFocalLength(manager, id)
             val binding = PhysicalCameraBinding(id, id, requestedLens, focalLength)
             Log.i(TAG, "✅ Strict standalone binding lens=$requestedLens id=$id focal=${focalLength ?: -1f}mm")
-            CameraDebugLog.append("✅ Strict standalone $requestedLens=$id")
             return binding
         }
 
         Log.w(TAG, "❌ No strict physical camera found for lens=$requestedLens")
-        CameraDebugLog.append("❌ No strict physical camera for $requestedLens")
         return null
     }
 
@@ -252,10 +236,6 @@ object DualCameraSupport {
                 val primaryId = cameraIdOf(primary)
                 val secondaryId = cameraIdOf(secondary)
                 Log.i(TAG, "✅ CameraX pair IDs: $primaryId + $secondaryId")
-                CameraDebugLog.append(
-                    "✅ CameraX pair IDs: $primaryId + $secondaryId " +
-                        "($primaryLens + $secondaryLens)",
-                )
                 return SupportedPair(
                     primary = primary,
                     secondary = secondary,

@@ -507,17 +507,14 @@ class VideoBatchesFolder(
                                     }
                                     context.contentResolver.update(uri, cv, null, null)
                                     Log.i(TAG, "perm-del: renamed $name → pending .tmp")
-                                    CameraDebugLog.append("perm-del: renamed $name → pending .tmp")
                                 } catch (e: Exception) {
                                     Log.w(TAG, "perm-del: rename $name FAILED: ${e.message}")
-                                    CameraDebugLog.append("perm-del: rename $name FAILED: ${e.message}")
                                 }
 
                                 // Step 2: 从 MediaStore 删除（此时已是 .tmp pending 文件）
                                 val rows = context.contentResolver.delete(uri, null, null)
                                 deleted = rows > 0
                                 Log.i(TAG, "perm-del: $name deleted=$deleted (rows=$rows)")
-                                CameraDebugLog.append("perm-del: $name deleted=$deleted (rows=$rows)")
                             }
                         }
                         deleted

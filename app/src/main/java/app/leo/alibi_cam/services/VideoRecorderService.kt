@@ -49,7 +49,6 @@ import app.leo.alibi_cam.helpers.VideoBatchesFolder
 import app.leo.alibi_cam.ui.RECORDER_INTERNAL_SELECTED_VALUE
 import app.leo.alibi_cam.ui.SUPPORTS_SAVING_VIDEOS_IN_CUSTOM_FOLDERS
 import app.leo.alibi_cam.ui.SUPPORTS_SCOPED_STORAGE
-import app.leo.alibi_cam.helpers.CameraDebugLog
 import app.leo.alibi_cam.helpers.CameraPosition
 import app.leo.alibi_cam.helpers.SensorDebugLog
 import app.leo.alibi_cam.ui.utils.DualCameraSupport
@@ -203,14 +202,6 @@ class VideoRecorderService :
                     else -> lensFacing.toString()
                 }
             }, cameraLensMode=${cameraLensMode ?: "null (default)"}")
-            CameraDebugLog.append("")
-            CameraDebugLog.append("🎥 Service init: lensFacing=${
-                when(lensFacing) {
-                    CameraSelector.LENS_FACING_BACK -> "BACK"
-                    CameraSelector.LENS_FACING_FRONT -> "FRONT"
-                    else -> lensFacing
-                }
-            }, cameraLensMode=${cameraLensMode ?: "null"}")
 
             // Simple selector — always bind the logical camera.
             // UW is engaged through zoom ratio, not physical camera ID.
@@ -247,7 +238,6 @@ class VideoRecorderService :
                 "primary=${System.identityHashCode(activePrimaryBatchesFolder)}, " +
                 "secondary=${activeSecondaryBatchesFolder?.let { System.identityHashCode(it) } ?: "none"}",
         )
-        CameraDebugLog.append("📁 Session: $sessionId (flat)")
 
         acquireRecordingWakeLock()
         super.start()
@@ -355,7 +345,6 @@ class VideoRecorderService :
             counter += 1
 
             Log.i(TAG, "🔄 startNewCycle: counter=$counter, interval=${settings.intervalDuration}ms, isDualMode=$isDualMode")
-            CameraDebugLog.append("🔄 startNewCycle: counter=$counter, interval=${settings.intervalDuration}ms, dual=$isDualMode")
 
             val isRestartBoundary = _cameraAvailableListener.isCompleted
             if (isRestartBoundary) {
@@ -402,8 +391,6 @@ class VideoRecorderService :
 
                 if (cameraReady == null) {
                     Log.e(TAG, "❌ Camera/recorder did not become ready before interval start")
-                    CameraDebugLog.append("❌ Camera/recorder readiness timeout before interval start")
-                    CameraDebugLog.flush()
                     return
                 }
             }
@@ -426,8 +413,6 @@ class VideoRecorderService :
             deleteOldRecordings()
         } catch (e: Exception) {
             Log.e(TAG, "❌ startNewCycle FAILED: ${e.javaClass.simpleName}: ${e.message}", e)
-            CameraDebugLog.append("❌ startNewCycle FAILED: ${e.javaClass.simpleName}: ${e.message}")
-            CameraDebugLog.flush()
         }
     }
 
@@ -463,7 +448,6 @@ class VideoRecorderService :
         stream.activeRecording = newRecording.start(ContextCompat.getMainExecutor(this)) { event ->
             if (event is VideoRecordEvent.Start) {
                 Log.i(TAG, "🎬 First frame captured for stream ${stream.position}")
-                CameraDebugLog.append("🎬 First frame captured: ${stream.position}")
                 activeStart?.complete(Unit)
             }
             if (event is VideoRecordEvent.Finalize) {
@@ -485,7 +469,6 @@ class VideoRecorderService :
             }
         }
         Log.i(TAG, "🎬 Recording started for stream ${stream.position}")
-        CameraDebugLog.append("🎬 Recording started: ${stream.position}")
     }
 
     /**
@@ -510,7 +493,6 @@ class VideoRecorderService :
 
         if (ready == null) {
             Log.w(TAG, "Timed out waiting for actual CameraX recording start")
-            CameraDebugLog.append("⚠️ Actual CameraX recording-start timeout")
             startSignals.forEach { signal -> signal.complete(Unit) }
         } else {
             Log.i(
@@ -542,7 +524,6 @@ class VideoRecorderService :
             val maxDurationMs = settings.maxDuration // 已是毫秒
 
             Log.i(TAG, "🧹 Duration pruning: maxDurationMs=$maxDurationMs")
-            CameraDebugLog.append("🧹 Duration pruning: maxDurationMs=$maxDurationMs")
 
             if (maxDurationMs <= 0) return
 
@@ -550,7 +531,6 @@ class VideoRecorderService :
             var totalMs = chunks.sumOf { it.second }
 
             Log.i(TAG, "🧹 ${chunks.size} chunks, totalMs=$totalMs")
-            CameraDebugLog.append("🧹 ${chunks.size} chunks, totalMs=$totalMs")
 
             if (totalMs <= maxDurationMs) return
 
@@ -563,12 +543,9 @@ class VideoRecorderService :
                     deleted++
                 }
                 Log.i(TAG, "🧹 deleteFlatChunk($name) dur=${durationMs}ms → $ok, remaining=$totalMs")
-                CameraDebugLog.append("🧹 deleteFlatChunk($name) dur=${durationMs}ms → $ok, remaining=$totalMs")
             }
 
             Log.i(TAG, "🧹 Duration pruning complete: deleted $deleted chunks, final=$totalMs ms")
-            CameraDebugLog.append("🧹 Duration pruning: deleted $deleted chunks, final=$totalMs ms")
-            CameraDebugLog.flush()
             // Also prune secondary batches folder in dual-camera mode
             secondaryCaptureFolder?.let { secFolder ->
                 secFolder.permanentlyDeleteRecordings = settings.permanentlyDeleteRecordings
@@ -589,8 +566,6 @@ class VideoRecorderService :
             }
         } catch (e: Exception) {
             Log.e(TAG, "🧹 deleteOldRecordings FAILED: ${e.javaClass.simpleName}: ${e.message}", e)
-            CameraDebugLog.append("🧹 ❌ deleteOldRecordings FAILED: ${e.javaClass.simpleName}: ${e.message}")
-            CameraDebugLog.flush()
         }
     }
 
@@ -696,10 +671,6 @@ class VideoRecorderService :
                         "⚡ Strict single-camera physical binding: logical=${binding.logicalCameraId}, " +
                             "physical=${binding.physicalId}, lens=${binding.kind}",
                     )
-                    CameraDebugLog.append(
-                        "⚡ Single physical: lens=$primaryLens, " +
-                            "logical=${binding.logicalCameraId}, physical=${binding.physicalId}",
-                    )
                     isDualMode = false
                     openPhysicalSingleCamera(binding)
                     return
@@ -711,7 +682,6 @@ class VideoRecorderService :
         }
 
         Log.i(TAG, "📸 openCamera: dualRequested=$dualRequested, strategy=${plan.strategy}")
-        CameraDebugLog.append("📸 openCamera: dualReq=$dualRequested, plan=${plan.strategy}")
 
         when (plan.strategy) {
             DualCameraSupport.Strategy.CONCURRENT_CAMERAX -> {
@@ -759,11 +729,6 @@ class VideoRecorderService :
             "📸 openPhysicalDualCamera: logical=${pair.logicalCameraId}, " +
                 "primary=${pair.primaryPhysicalId}, secondary=${pair.secondaryPhysicalId}",
         )
-        CameraDebugLog.append(
-            "📸 Physical dual: logical=${pair.logicalCameraId}, " +
-                "primary=${pair.primaryPhysicalId}($primaryPosition), " +
-                "secondary=${pair.secondaryPhysicalId}($secondaryPosition)",
-        )
 
         // Keep both streams in the user's selected storage type. The position
         // suffix isolates secondary chunks and merged output from the primary.
@@ -791,7 +756,6 @@ class VideoRecorderService :
             counter = counter,
             onStarted = {
                 Log.i(TAG, "📸 ✅ Physical dual camera recorder ready")
-                CameraDebugLog.append("📸 ✅ Physical dual recorder READY")
                 runOnMain {
                     _cameraAvailableListener.complete(Unit)
                     onCameraControlAvailable()
@@ -799,7 +763,6 @@ class VideoRecorderService :
             },
             onError = { error ->
                 Log.e(TAG, "📸 ❌ Physical dual camera failed: $error")
-                CameraDebugLog.append("📸 ❌ Physical dual failed: $error")
                 runOnMain {
                     physicalDualRecorder?.stop()
                     physicalDualRecorder = null
@@ -821,10 +784,6 @@ class VideoRecorderService :
             "📸 openPhysicalSingleCamera: logical=${binding.logicalCameraId}, " +
                 "physical=${binding.physicalId}, focal=${binding.focalLengthMm ?: -1f}mm",
         )
-        CameraDebugLog.append(
-            "📸 Physical single READY request: physical=${binding.physicalId}, " +
-                "logical=${binding.logicalCameraId}",
-        )
 
         physicalDualRecorder = Camera2PhysicalDualRecorder(
             context = this,
@@ -845,7 +804,6 @@ class VideoRecorderService :
             counter = counter,
             onStarted = {
                 Log.i(TAG, "📸 ✅ Physical single camera recorder ready")
-                CameraDebugLog.append("📸 ✅ Physical single recorder READY")
                 runOnMain {
                     _cameraAvailableListener.complete(Unit)
                     onCameraControlAvailable()
@@ -853,7 +811,6 @@ class VideoRecorderService :
             },
             onError = { error ->
                 Log.e(TAG, "📸 ❌ Physical single camera failed: $error")
-                CameraDebugLog.append("📸 ❌ Physical single failed: $error")
                 runOnMain {
                     physicalDualRecorder?.stop()
                     physicalDualRecorder = null
@@ -924,7 +881,6 @@ class VideoRecorderService :
         )
 
         Log.i(TAG, "📸 Binding concurrent cameras: primary=${pair.primarySelector}, secondary=${pair.secondarySelector}")
-        CameraDebugLog.append("📸 Binding concurrent cameras")
 
         runOnMain {
             try {
@@ -959,11 +915,8 @@ class VideoRecorderService :
                 onCameraControlAvailable()
                 _cameraAvailableListener.complete(Unit)
                 Log.i(TAG, "📸 ✅ Concurrent cameras bound successfully!")
-                CameraDebugLog.append("📸 ✅ Concurrent cameras BOUND!")
             } catch (e: Exception) {
                 Log.e(TAG, "📸 ❌ Dual camera binding failed: ${e.message}", e)
-                CameraDebugLog.append("📸 ❌ Dual camera bind failed: ${e.message}")
-                CameraDebugLog.flush()
                 // Fallback to single camera
                 isDualMode = false
                 openSingleCamera()
@@ -981,7 +934,6 @@ class VideoRecorderService :
             if (!success) {
                 // Step 2: Retry with 16:9 (many sensors only support 16:9 natively)
                 Log.i(TAG, "📸 Retrying with 16:9 (sensor may not support $userAspectRatio)...")
-                CameraDebugLog.append("📸 Retry with 16:9")
                 tryBindCamera(
                     aspectRatio = "16:9",
                 ) { secondSuccess ->
@@ -989,21 +941,16 @@ class VideoRecorderService :
                         // Step 3: Retry with 4:3 (opposite fallback)
                         if (userAspectRatio != "4:3") {
                             Log.i(TAG, "📸 Retrying with 4:3 as last resort...")
-                            CameraDebugLog.append("📸 Retry with 4:3")
                             tryBindCamera(
                                 aspectRatio = "4:3",
                             ) { thirdSuccess ->
                                 if (!thirdSuccess) {
                                     Log.e(TAG, "📸 ❌ All binding attempts failed")
-                                    CameraDebugLog.append("📸 ❌ All binding attempts failed")
-                                    CameraDebugLog.flush()
                                     runOnMain { onError() }
                                 }
                             }
                         } else {
                             Log.e(TAG, "📸 ❌ Binding failed with both 4:3 and 16:9")
-                            CameraDebugLog.append("📸 ❌ Binding failed")
-                            CameraDebugLog.flush()
                             runOnMain { onError() }
                         }
                     }
@@ -1039,7 +986,6 @@ class VideoRecorderService :
         }
 
         Log.i(TAG, "📸 Trying to bind camera [ratio=${aspectRatio ?: "4:3"}]...")
-        CameraDebugLog.append("📸 Binding camera [ratio=${aspectRatio ?: "4:3"}]")
 
         runOnMain {
             try {
@@ -1070,7 +1016,6 @@ class VideoRecorderService :
                     )
                 }
                 Log.i(TAG, "📸 ✅ Camera bound! ID=$boundCameraId, ratio=${aspectRatio ?: "4:3"}")
-                CameraDebugLog.append("📸 ✅ Camera BOUND! ID=$boundCameraId, ratio=${aspectRatio ?: "4:3"}")
 
                 // ── Ultra-wide engagement via zoom ratio ──
                 if (cameraLensMode == "ultrawide") {
@@ -1087,7 +1032,6 @@ class VideoRecorderService :
                 onResult?.invoke(true)
             } catch (error: IllegalArgumentException) {
                 Log.w(TAG, "📸 ❌ Bind failed [ratio=${aspectRatio ?: "4:3"}]: ${error.message}")
-                CameraDebugLog.append("📸 ❌ Bind failed: ${error.message}")
                 onResult?.invoke(false)
             }
         }
@@ -1103,17 +1047,13 @@ class VideoRecorderService :
         val maxZoom = zoomState?.maxZoomRatio ?: 1f
 
         Log.i(TAG, "📸 Zoom state: min=$minZoom, max=$maxZoom")
-        CameraDebugLog.append("📸 Zoom state: min=$minZoom, max=$maxZoom")
 
         if (minZoom < 1.0f) {
             cam.cameraControl.setZoomRatio(minZoom)
             Log.i(TAG, "📸 ✅ Ultra-wide ENGAGED via zoom: ${"%.2f".format(minZoom)}x")
-            CameraDebugLog.append("📸 ✅ UW ENGAGED via zoom: ${"%.2f".format(minZoom)}x")
         } else {
             Log.i(TAG, "📸 ℹ️ minZoom=$minZoom — no ultra-wide hardware available, staying at 1x")
-            CameraDebugLog.append("📸 ⚠️ minZoom=$minZoom, no UW hardware (zoom stays at 1x)")
         }
-        CameraDebugLog.flush()
     }
 
     // ────────────────────────────────────────────────────────────
@@ -1405,8 +1345,6 @@ class VideoRecorderService :
                 recorder.stopAndMuxAudio()
             } catch (e: Exception) {
                 Log.w(TAG, "Error stopping/muxing physical dual recorder", e)
-                CameraDebugLog.append("⚠️ Physical dual stop/mux failed: ${e.message}")
-                CameraDebugLog.flush()
             }
         }
         physicalDualRecorder = null

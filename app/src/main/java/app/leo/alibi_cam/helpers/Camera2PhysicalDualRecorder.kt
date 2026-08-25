@@ -99,7 +99,6 @@ class Camera2PhysicalDualRecorder(
             val message =
                 "Secondary physical=$secondaryPhysicalId has no output folder; forcing single stream"
             Log.w(TAG, "⚠️ $message")
-            CameraDebugLog.append("⚠️ Physical recorder: $message")
         }
     }
 
@@ -179,17 +178,12 @@ class Camera2PhysicalDualRecorder(
                 "primary=$primaryPhysicalId, secondary=$secondaryPhysicalId, " +
                 "counter=$counter, audio=$enableAudio",
         )
-        CameraDebugLog.append(
-            "🎬 Start Camera2Physical($streamMode): prim=$primaryPhysicalId, " +
-                "sec=$secondaryPhysicalId, count=$counter, audio=$enableAudio",
-        )
 
         startBackgroundThread()
 
         try {
             if (cameraDevice != null) {
                 Log.i(TAG, "♻️ Reusing open CameraDevice for next physical $streamMode segment")
-                CameraDebugLog.append("♻️ Reuse CameraDevice($streamMode) for counter=$counter")
                 prepareOutputs(counter)
                 createDualCaptureSession(onStarted, onError)
                 return
@@ -208,8 +202,6 @@ class Camera2PhysicalDualRecorder(
             isOutputPreparationFailed = true
             val msg = "Camera2PhysicalDualRecorder init failed: ${e.message}"
             Log.e(TAG, msg, e)
-            CameraDebugLog.append("📸 ❌ $msg")
-            CameraDebugLog.flush()
             runCatching { cameraDevice?.close() }
             cameraDevice = null
             onError(msg)
@@ -266,7 +258,6 @@ class Camera2PhysicalDualRecorder(
                         val openDurationMs = SystemClock.elapsedRealtime() - openStartedAtMs
                         val streamMode = if (isSinglePhysicalStream) "single-stream" else "dual-stream"
                         Log.i(TAG, "📸 Camera $logicalCameraId opened for physical $streamMode streaming in ${openDurationMs}ms")
-                        CameraDebugLog.append("📸 Camera $logicalCameraId opened in ${openDurationMs}ms")
 
                         if (isOutputPreparationFailed) {
                             device.close()
@@ -282,7 +273,6 @@ class Camera2PhysicalDualRecorder(
 
                     override fun onDisconnected(device: CameraDevice) {
                         Log.w(TAG, "📸 Camera 0 disconnected")
-                        CameraDebugLog.append("📸 Camera 0 disconnected")
                         device.close()
                         cameraDevice = null
                     }
@@ -290,8 +280,6 @@ class Camera2PhysicalDualRecorder(
                     override fun onError(device: CameraDevice, error: Int) {
                         val errMsg = "Camera $logicalCameraId open error: $error"
                         Log.e(TAG, "📸 ❌ $errMsg")
-                        CameraDebugLog.append("📸 ❌ $errMsg")
-                        CameraDebugLog.flush()
                         device.close()
                         cameraDevice = null
                         onError(errMsg)
@@ -301,8 +289,6 @@ class Camera2PhysicalDualRecorder(
         } catch (e: Exception) {
             val msg = "Camera2PhysicalDualRecorder init failed: ${e.message}"
             Log.e(TAG, msg, e)
-            CameraDebugLog.append("📸 ❌ $msg")
-            CameraDebugLog.flush()
             onError(msg)
         }
     }
@@ -347,7 +333,6 @@ class Camera2PhysicalDualRecorder(
                 listOfNotNull(primaryPhysicalId, secondaryPhysicalId)
                     .joinToString(prefix = "[", postfix = "]"),
         )
-        CameraDebugLog.append("📸 Creating Session: prim physical=$primaryPhysicalId, sec physical=$secondaryPhysicalId")
 
         val sessionConfig = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR,
@@ -414,15 +399,11 @@ class Camera2PhysicalDualRecorder(
 
                         val streamMode = if (isSinglePhysicalStream) "single stream" else "dual streams"
                         Log.i(TAG, "📸 ✅ Camera2 physical $streamMode recording started successfully!")
-                        CameraDebugLog.append("📸 ✅ Camera2 physical $streamMode STARTED!")
-                        CameraDebugLog.flush()
 
                         onStarted()
                     } catch (e: Exception) {
                         val msg = "Failed to start physical capture session: ${e.message}"
                         Log.e(TAG, msg, e)
-                        CameraDebugLog.append("📸 ❌ $msg")
-                        CameraDebugLog.flush()
                         onError(msg)
                     }
                 }
@@ -438,8 +419,6 @@ class Camera2PhysicalDualRecorder(
                             if (isSinglePhysicalStream) "single" else "dual"
                         } session configuration failed"
                     Log.e(TAG, msg)
-                    CameraDebugLog.append("📸 ❌ $msg")
-                    CameraDebugLog.flush()
                     onError(msg)
                 }
             }
@@ -450,8 +429,6 @@ class Camera2PhysicalDualRecorder(
         } catch (e: Exception) {
             val msg = "Failed to call createCaptureSession: ${e.message}"
             Log.e(TAG, msg, e)
-            CameraDebugLog.append("📸 ❌ $msg")
-            CameraDebugLog.flush()
             onError(msg)
         }
     }
@@ -705,7 +682,6 @@ class Camera2PhysicalDualRecorder(
             val orientationHint = getOrientationHint(physicalCameraId)
             setOrientationHint(orientationHint)
             Log.i(TAG, "🧭 orientation physical=$physicalCameraId, hint=$orientationHint")
-            CameraDebugLog.append("🧭 Orientation physical=$physicalCameraId hint=$orientationHint")
 
             prepare()
 
@@ -736,7 +712,6 @@ class Camera2PhysicalDualRecorder(
         }
         val hint = (sensorOrientation - deviceRotation + 360) % 360
         Log.i(TAG, "🧭 orientation details physical=$physicalCameraId sensor=$sensorOrientation displayRotation=$displayRotation deviceDegrees=$deviceRotation hint=$hint")
-        CameraDebugLog.append("🧭 Orientation details id=$physicalCameraId sensor=$sensorOrientation display=$displayRotation hint=$hint")
         return hint
     }
 
@@ -836,7 +811,6 @@ class Camera2PhysicalDualRecorder(
 
         val rotationStartMs = SystemClock.elapsedRealtime()
         Log.i(TAG, "🔄 Rotating physical segment: current=$currentCounter next=$counter")
-        CameraDebugLog.append("🔄 Physical segment restart: current=$currentCounter next=$counter")
         isRecording = false
 
         var started = false
@@ -866,8 +840,6 @@ class Camera2PhysicalDualRecorder(
                         Log.i(TAG, "🔄 ✅ Physical segment restarted at counter=$counter")
                     } else {
                         Log.e(TAG, "🔄 ❌ Physical segment restart failed at counter=$counter")
-                        CameraDebugLog.append("❌ Physical segment restart failed counter=$counter")
-                        CameraDebugLog.flush()
                     }
                 } finally {
                     retiredFinalizer.join()
@@ -876,16 +848,10 @@ class Camera2PhysicalDualRecorder(
         } catch (error: Exception) {
             started = false
             Log.e(TAG, "🔄 ❌ Physical segment rotation threw an exception", error)
-            CameraDebugLog.append("❌ Physical segment rotation exception: ${error.message}")
-            CameraDebugLog.flush()
         }
 
         if (started) {
             Log.i(TAG, "🔄 Physical segment rotation completed in ${SystemClock.elapsedRealtime() - rotationStartMs}ms")
-            CameraDebugLog.append(
-                "🔄 ✅ Physical segment restarted counter=$counter " +
-                    "total=${SystemClock.elapsedRealtime() - rotationStartMs}ms",
-            )
         }
         return started
     }
@@ -925,20 +891,16 @@ class Camera2PhysicalDualRecorder(
                     try {
                         val count = context.contentResolver.update(uri, values, null, null)
                         Log.i(TAG, "📁 Committed Scoped Storage URI: $uri (updated=$count)")
-                        CameraDebugLog.append("📁 Committed URI (pending=0): $uri")
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to commit URI $uri", e)
-                        CameraDebugLog.append("⚠️ Failed to commit URI: ${e.message}")
                     }
                 }
             }
-            CameraDebugLog.flush()
         }
     }
 
     fun stop() {
         Log.i(TAG, "⏹️ Stopping Camera2PhysicalDualRecorder")
-        CameraDebugLog.append("⏹️ Stopping Camera2PhysicalDualRecorder")
 
         isRecording = false
 
@@ -947,8 +909,6 @@ class Camera2PhysicalDualRecorder(
         stopCurrentCaptureAndRecordersBlocking(stopBackground = true)
         clearOutputState()
         Log.i(TAG, "⏹️ Camera2PhysicalDualRecorder stopped completely (audio mux skipped)")
-        CameraDebugLog.append("⏹️ Camera2PhysicalDualRecorder stopped without audio mux")
-        CameraDebugLog.flush()
     }
 
     /**
@@ -958,7 +918,6 @@ class Camera2PhysicalDualRecorder(
      */
     suspend fun stopAndMuxAudio() {
         Log.i(TAG, "⏹️ Stopping physical dual recorder with shared audio")
-        CameraDebugLog.append("⏹️ Stop physical dual recorder + shared audio")
         isRecording = false
 
         stopCurrentCaptureAndRecorders(stopBackground = true)
@@ -966,8 +925,6 @@ class Camera2PhysicalDualRecorder(
         clearOutputState()
 
         Log.i(TAG, "⏹️ Camera2PhysicalDualRecorder stopped completely (audio mux finished)")
-        CameraDebugLog.append("⏹️ Camera2PhysicalDualRecorder stopped + audio mux finished")
-        CameraDebugLog.flush()
     }
 
     private suspend fun stopCurrentCaptureAndRecorders(stopBackground: Boolean) {
@@ -1196,7 +1153,6 @@ class Camera2PhysicalDualRecorder(
 
         val targets = segmentTargets.toSortedMap()
         Log.i(TAG, "🔊 Muxing primary audio into ${targets.size} physical video segment(s)")
-        CameraDebugLog.append("🔊 Mux shared audio segments=${targets.size}")
 
         for ((counter, segment) in targets) {
             val secondaryTarget = segment.secondary
@@ -1208,7 +1164,6 @@ class Camera2PhysicalDualRecorder(
             val secondaryInput = getFfmpegInput(secondaryTarget)
             if (primaryInput == null || secondaryInput == null) {
                 Log.w(TAG, "🔊 Skip audio mux counter=$counter: input unavailable")
-                CameraDebugLog.append("⚠️ Audio mux skip counter=$counter input unavailable")
                 primaryInput?.close()
                 secondaryInput?.close()
                 continue
@@ -1228,25 +1183,17 @@ class Camera2PhysicalDualRecorder(
                         "secondary=${segment.secondary.label}(fd=${secondaryInput.fd ?: "path"}) " +
                         "command=$command",
                 )
-                CameraDebugLog.append(
-                    "🔊 Mux start counter=$counter " +
-                        "primaryFd=${primaryInput.fd ?: "path"} " +
-                        "secondaryFd=${secondaryInput.fd ?: "path"}",
-                )
 
                 val succeeded = runFfmpeg(command)
                 if (succeeded && temporaryOutput.exists() && temporaryOutput.length() > 0L) {
                     val copied = copyFileToTarget(temporaryOutput, secondaryTarget)
                     if (copied) {
                         Log.i(TAG, "🔊 ✅ Mux success counter=$counter, secondary audio replaced")
-                        CameraDebugLog.append("🔊 ✅ Mux success counter=$counter")
                     } else {
                         Log.e(TAG, "🔊 ❌ Mux output copy failed counter=$counter; original secondary kept")
-                        CameraDebugLog.append("❌ Mux copy failed counter=$counter; original kept")
                     }
                 } else {
                     Log.e(TAG, "🔊 ❌ FFmpeg mux failed counter=$counter; original secondary kept")
-                    CameraDebugLog.append("❌ FFmpeg mux failed counter=$counter; original kept")
                 }
             } finally {
                 primaryInput.close()
@@ -1254,7 +1201,6 @@ class Camera2PhysicalDualRecorder(
                 runCatching { temporaryOutput.delete() }
             }
         }
-        CameraDebugLog.flush()
     }
 
     private fun getFfmpegInput(target: OutputTarget): FfmpegInput? {

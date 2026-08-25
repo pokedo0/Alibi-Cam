@@ -6,7 +6,6 @@ import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.util.Log
 import androidx.camera.core.CameraSelector
-import app.leo.alibi_cam.helpers.CameraDebugLog
 
 /**
  * Lightweight camera info — no physical-camera enumeration, no metadata-based UW detection.
@@ -65,29 +64,21 @@ data class CameraInfo(
             val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val allCameras = mutableListOf<CameraInfo>()
 
-            CameraDebugLog.init(context)
-
             val rawIdList = cameraManager.cameraIdList.toList()
             Log.i(TAG, "═══════════════════════════════════════════")
             Log.i(TAG, "🔍 Camera enumeration (package: ${context.packageName})")
             Log.i(TAG, "📦 Raw cameraManager.cameraIdList = $rawIdList")
             Log.i(TAG, "═══════════════════════════════════════════")
-            CameraDebugLog.append("═══════════════════════════")
-            CameraDebugLog.append("🔍 Camera enumeration (pkg: ${context.packageName})")
-            CameraDebugLog.append("📦 Raw cameraIdList: $rawIdList")
 
             // Log concurrent camera combinations if supported by system
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 try {
                     val concurrentSets = cameraManager.concurrentCameraIds
                     Log.i(TAG, "⚡ CameraManager.getConcurrentCameraIds() = $concurrentSets")
-                    CameraDebugLog.append("⚡ ConcurrentCameraIds: $concurrentSets")
                 } catch (e: Exception) {
                     Log.w(TAG, "⚠️ Failed to get concurrent camera ids: ${e.message}")
-                    CameraDebugLog.append("⚠️ ConcurrentCameraIds err: ${e.message}")
                 }
             }
-            CameraDebugLog.append("═══════════════════════════")
 
             cameraManager.cameraIdList.forEach { cameraId ->
                 try {
@@ -112,7 +103,6 @@ data class CameraInfo(
                     }
 
                     Log.i(TAG, "  Camera [$cameraId]: facing=$facingLabel, minFocal=$minFocalLength (focals: $allFocals), physicalIds=[$physicalIds]")
-                    CameraDebugLog.append("  [$cameraId] $facingLabel focal=$minFocalLength focals=[$allFocals] physical=[$physicalIds]")
 
                     allCameras.add(
                         CameraInfo(
@@ -123,7 +113,6 @@ data class CameraInfo(
                     )
                 } catch (e: Exception) {
                     Log.e(TAG, "  ⚠️ Error querying camera $cameraId: ${e.message}")
-                    CameraDebugLog.append("  ⚠️ Error [$cameraId]: ${e.message}")
                 }
             }
 
@@ -134,11 +123,8 @@ data class CameraInfo(
             Log.i(TAG, "📋 Final: ${uniqueCameras.size} cameras")
             uniqueCameras.forEach { cam ->
                 Log.i(TAG, "  [${cam.cameraId}] lens=${cam.lens}, focal=${cam.focalLength}")
-                CameraDebugLog.append("  [${cam.cameraId}] lens=${cam.lens} focal=${cam.focalLength}")
             }
             Log.i(TAG, "═══════════════════════════════════════════")
-            CameraDebugLog.append("═══════════════════════════")
-            CameraDebugLog.flush()
 
             return uniqueCameras
         }
@@ -157,59 +143,47 @@ data class CameraInfo(
             preference: String?,
             cameras: List<CameraInfo>,
         ): Pair<Int, String?> {
-            CameraDebugLog.append("")
-            CameraDebugLog.append("🎯 resolveCamera: preference=$preference")
-
             val hasBackCamera = cameras.any { it.lensFacing == CameraSelector.LENS_FACING_BACK }
 
             val result = when (preference) {
                 "ultrawide" -> {
                     if (hasBackCamera) {
                         Log.i(TAG, "🎯 UW mode → back camera + zoom-to-min")
-                        CameraDebugLog.append("  → UW mode: BACK + zoom-min")
                         Pair(CameraSelector.LENS_FACING_BACK, "ultrawide")
                     } else {
                         Log.w(TAG, "🎯 UW requested but no back camera → front")
-                        CameraDebugLog.append("  → UW mode: no back camera, using front")
                         Pair(CameraSelector.LENS_FACING_FRONT, null)
                     }
                 }
                 "main" -> {
                     if (hasBackCamera) {
                         Log.i(TAG, "🎯 Main mode → back camera at 1x")
-                        CameraDebugLog.append("  → Main mode: BACK at 1x")
                         Pair(CameraSelector.LENS_FACING_BACK, "main")
                     } else {
                         Log.w(TAG, "🎯 Main requested but no back camera → front")
-                        CameraDebugLog.append("  → Main mode: no back camera, using front")
                         Pair(CameraSelector.LENS_FACING_FRONT, null)
                     }
                 }
                 "telephoto" -> {
                     if (hasBackCamera) {
                         Log.i(TAG, "🎯 Telephoto mode → back camera (physical telephoto ID 3 or focal > 10)")
-                        CameraDebugLog.append("  → Telephoto mode: BACK (telephoto)")
                         Pair(CameraSelector.LENS_FACING_BACK, "telephoto")
                     } else {
                         Log.w(TAG, "🎯 Telephoto requested but no back camera → front")
-                        CameraDebugLog.append("  → Telephoto mode: no back camera, using front")
                         Pair(CameraSelector.LENS_FACING_FRONT, null)
                     }
                 }
                 "front" -> {
                     Log.i(TAG, "🎯 Front selected")
-                    CameraDebugLog.append("  → Front")
                     Pair(CameraSelector.LENS_FACING_FRONT, null)
                 }
                 // "auto" or null: prefer UW via zoom, fall back gracefully
                 else -> {
                     if (hasBackCamera) {
                         Log.i(TAG, "🎯 Auto → back camera (zoom-based UW)")
-                        CameraDebugLog.append("  → Auto: BACK (zoom-based UW)")
                         Pair(CameraSelector.LENS_FACING_BACK, "ultrawide")
                     } else {
                         Log.w(TAG, "🎯 Auto → no back camera, trying front")
-                        CameraDebugLog.append("  → Auto: no back, using front")
                         Pair(CameraSelector.LENS_FACING_FRONT, null)
                     }
                 }
